@@ -44,7 +44,6 @@ data/processed/*
 !data/processed/.gitkeep
 
 # Environment variables
-.env
 .env.local
 .env.*.local
 
