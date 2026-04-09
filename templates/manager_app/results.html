@@ -168,105 +168,102 @@
         </div>
 
         <script>
-        (function() {
-            var params  = {{ parsed_params | tojson }};
-            var rawData = {{ parsed_data | tojson }};
+        // Data from server
+        var _params  = {{ parsed_params | tojson }};
+        var _rawData = {{ parsed_data | tojson }};
+        var _allRules    = _rawData.association_rules || [];
+        var _allItemsets = _rawData.frequent_itemsets || [];
 
-            var itemsets = rawData.frequent_itemsets || [];
-            var rules    = rawData.association_rules || [];
+        // Stats
+        document.getElementById('statTxns').textContent     = (_params.transaction_count || '-').toLocaleString();
+        document.getElementById('statItemsets').textContent  = _allItemsets.length.toLocaleString();
+        document.getElementById('statRules').textContent     = _allRules.length.toLocaleString();
+        document.getElementById('statSupport').textContent   = _params.min_support;
+        document.getElementById('rulesBadge').textContent    = _allRules.length;
+        document.getElementById('itemsetsBadge').textContent = _allItemsets.length;
 
-            // Stats
-            document.getElementById('statTxns').textContent     = (params.transaction_count || '-').toLocaleString();
-            document.getElementById('statItemsets').textContent  = itemsets.length.toLocaleString();
-            document.getElementById('statRules').textContent     = rules.length.toLocaleString();
-            document.getElementById('statSupport').textContent   = params.min_support;
-            document.getElementById('rulesBadge').textContent    = rules.length;
-            document.getElementById('itemsetsBadge').textContent = itemsets.length;
+        // ---- Rules rendering ----
+        function confBar(pct) {
+            var color = pct >= 80 ? 'success' : pct >= 50 ? 'primary' : 'warning';
+            return '<div class="d-flex align-items-center">'
+                + '<div class="progress flex-grow-1" style="height:8px;width:80px;">'
+                + '<div class="progress-bar bg-' + color + '" style="width:' + pct + '%"></div>'
+                + '</div>'
+                + '<small class="ms-2">' + pct + '%</small></div>';
+        }
 
-            // ---- Render rules ----
-            window._allRules = rules;
-            window._allItemsets = itemsets;
-            renderRules(rules);
-            filterItemsets();
+        function renderRules(list) {
+            var body = document.getElementById('rulesBody');
+            var html = '';
+            var show = list.slice(0, 200);
+            for (var i = 0; i < show.length; i++) {
+                var r = show[i];
+                var conf = (r.confidence * 100).toFixed(1);
+                var sup  = (r.support * 100).toFixed(2);
+                var lift = r.lift.toFixed(2);
+                var liftClass = r.lift > 3 ? 'text-success fw-bold' : r.lift > 1.5 ? 'text-primary' : '';
 
-            function renderRules(list) {
-                var body = document.getElementById('rulesBody');
-                var html = '';
-                var show = list.slice(0, 200);
-                for (var i = 0; i < show.length; i++) {
-                    var r = show[i];
-                    var conf = (r.confidence * 100).toFixed(1);
-                    var sup  = (r.support * 100).toFixed(2);
-                    var lift = r.lift.toFixed(2);
-                    var liftClass = r.lift > 3 ? 'text-success fw-bold' : r.lift > 1.5 ? 'text-primary' : '';
-
-                    html += '<tr>'
-                        + '<td class="text-muted">' + (i+1) + '</td>'
-                        + '<td><span class="badge bg-light text-dark border">' + r.antecedents.join('</span> <span class="badge bg-light text-dark border">') + '</span></td>'
-                        + '<td><i class="fas fa-long-arrow-alt-right text-primary"></i></td>'
-                        + '<td><span class="badge bg-light text-dark border">' + r.consequents.join('</span> <span class="badge bg-light text-dark border">') + '</span></td>'
-                        + '<td>' + confBar(conf) + '</td>'
-                        + '<td>' + sup + '%</td>'
-                        + '<td class="' + liftClass + '">' + lift + '</td>'
-                        + '</tr>';
-                }
-                body.innerHTML = html || '<tr><td colspan="7" class="text-center text-muted">No rules found</td></tr>';
-                document.getElementById('rulesFooter').textContent =
-                    'Showing ' + show.length + ' of ' + list.length + ' rules';
+                html += '<tr>'
+                    + '<td class="text-muted">' + (i+1) + '</td>'
+                    + '<td><span class="badge bg-light text-dark border">' + r.antecedents.join('</span> <span class="badge bg-light text-dark border">') + '</span></td>'
+                    + '<td><i class="fas fa-long-arrow-alt-right text-primary"></i></td>'
+                    + '<td><span class="badge bg-light text-dark border">' + r.consequents.join('</span> <span class="badge bg-light text-dark border">') + '</span></td>'
+                    + '<td>' + confBar(conf) + '</td>'
+                    + '<td>' + sup + '%</td>'
+                    + '<td class="' + liftClass + '">' + lift + '</td>'
+                    + '</tr>';
             }
+            body.innerHTML = html || '<tr><td colspan="7" class="text-center text-muted">No rules found</td></tr>';
+            document.getElementById('rulesFooter').textContent =
+                'Showing ' + show.length + ' of ' + list.length + ' rules';
+        }
 
-            function confBar(pct) {
-                var color = pct >= 80 ? 'success' : pct >= 50 ? 'primary' : 'warning';
-                return '<div class="d-flex align-items-center">'
-                    + '<div class="progress flex-grow-1" style="height:8px;width:80px;">'
-                    + '<div class="progress-bar bg-' + color + '" style="width:' + pct + '%"></div>'
-                    + '</div>'
-                    + '<small class="ms-2">' + pct + '%</small></div>';
+        function filterRules() {
+            var q = document.getElementById('rulesSearch').value.toLowerCase();
+            if (!q) { renderRules(_allRules); return; }
+            var filtered = _allRules.filter(function(r) {
+                return r.antecedents.join(' ').toLowerCase().indexOf(q) >= 0
+                    || r.consequents.join(' ').toLowerCase().indexOf(q) >= 0;
+            });
+            renderRules(filtered);
+        }
+
+        // ---- Itemsets rendering ----
+        function renderItemsets(list) {
+            var body = document.getElementById('itemsetsBody');
+            var html = '';
+            var show = list.slice(0, 300);
+            for (var i = 0; i < show.length; i++) {
+                var is = show[i];
+                var supPct = (is.support * 100).toFixed(2);
+                html += '<tr>'
+                    + '<td class="text-muted">' + (i+1) + '</td>'
+                    + '<td>' + is.items.map(function(x){ return '<span class="badge bg-info text-dark me-1">' + x + '</span>'; }).join('') + '</td>'
+                    + '<td><span class="badge bg-secondary">' + is.items.length + '</span></td>'
+                    + '<td>' + is.freq.toLocaleString() + '</td>'
+                    + '<td>' + is.support.toFixed(4) + '</td>'
+                    + '<td>' + supPct + '%</td>'
+                    + '</tr>';
             }
+            body.innerHTML = html || '<tr><td colspan="6" class="text-center text-muted">No itemsets match filters</td></tr>';
+            document.getElementById('itemsetsFooter').textContent =
+                'Showing ' + show.length + ' of ' + list.length + ' itemsets';
+        }
 
-            window.filterRules = function() {
-                var q = document.getElementById('rulesSearch').value.toLowerCase();
-                if (!q) { renderRules(window._allRules); return; }
-                var filtered = window._allRules.filter(function(r) {
-                    return r.antecedents.join(' ').toLowerCase().indexOf(q) >= 0
-                        || r.consequents.join(' ').toLowerCase().indexOf(q) >= 0;
-                });
-                renderRules(filtered);
-            };
+        function filterItemsets() {
+            var minSize = parseInt(document.getElementById('itemsetSizeFilter').value) || 0;
+            var q = document.getElementById('itemsetsSearch').value.toLowerCase();
+            var filtered = _allItemsets.filter(function(is) {
+                if (is.items.length < minSize) return false;
+                if (q && is.items.join(' ').toLowerCase().indexOf(q) < 0) return false;
+                return true;
+            });
+            renderItemsets(filtered);
+        }
 
-            // ---- Render itemsets ----
-            window.filterItemsets = function() {
-                var minSize = parseInt(document.getElementById('itemsetSizeFilter').value) || 0;
-                var q = document.getElementById('itemsetsSearch').value.toLowerCase();
-                var filtered = window._allItemsets.filter(function(is) {
-                    if (is.items.length < minSize) return false;
-                    if (q && is.items.join(' ').toLowerCase().indexOf(q) < 0) return false;
-                    return true;
-                });
-                renderItemsets(filtered);
-            };
-
-            function renderItemsets(list) {
-                var body = document.getElementById('itemsetsBody');
-                var html = '';
-                var show = list.slice(0, 300);
-                for (var i = 0; i < show.length; i++) {
-                    var is = show[i];
-                    var supPct = (is.support * 100).toFixed(2);
-                    html += '<tr>'
-                        + '<td class="text-muted">' + (i+1) + '</td>'
-                        + '<td>' + is.items.map(function(x){ return '<span class="badge bg-info text-dark me-1">' + x + '</span>'; }).join('') + '</td>'
-                        + '<td><span class="badge bg-secondary">' + is.items.length + '</span></td>'
-                        + '<td>' + is.freq.toLocaleString() + '</td>'
-                        + '<td>' + is.support.toFixed(4) + '</td>'
-                        + '<td>' + supPct + '%</td>'
-                        + '</tr>';
-                }
-                body.innerHTML = html || '<tr><td colspan="6" class="text-center text-muted">No itemsets match filters</td></tr>';
-                document.getElementById('itemsetsFooter').textContent =
-                    'Showing ' + show.length + ' of ' + list.length + ' itemsets';
-            }
-        })();
+        // ---- Initial render ----
+        renderRules(_allRules);
+        filterItemsets();
         </script>
 
         {% else %}
