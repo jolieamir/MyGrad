@@ -20,6 +20,7 @@ _mining_progress = {
     'total_steps': 5,
     'message': '',
     'detail': '',
+    'sub_progress': 0,  # 0-100 within current step
     'done': False,
     'error': None,
     'result_id': None,
@@ -224,8 +225,15 @@ def mining_run():
 
         try:
             with app.app_context():
+                # Progress callback for algorithms
+                def on_progress(pct, detail=None):
+                    p['sub_progress'] = pct
+                    if detail:
+                        p['detail'] = detail
+
                 # Step 1: Load transactions
-                p.update(step=1, message='Loading transactions from SQL Server...',
+                p.update(step=1, sub_progress=0,
+                         message='Loading transactions from SQL Server...',
                          detail='Querying Cleaned_data and grouping by InvoiceNo')
 
                 from data_mining.data_pipeline import DataPipeline
@@ -234,6 +242,7 @@ def mining_run():
                 from data_mining.recommendations import RecommendationEngine
 
                 pipeline = DataPipeline()
+                p['sub_progress'] = 50
                 transactions = pipeline.get_transactions()
                 pipeline.close()
 
@@ -242,10 +251,12 @@ def mining_run():
                              error='No transactions found. Upload a CSV first.')
                     return
 
-                p['detail'] = f'{len(transactions)} transactions loaded'
+                p.update(sub_progress=100,
+                         detail=f'{len(transactions)} transactions loaded')
 
                 # Step 2: Run algorithm
-                p.update(step=2, message=f'Running {algorithm.upper()} algorithm...',
+                p.update(step=2, sub_progress=0,
+                         message=f'Running {algorithm.upper()} algorithm...',
                          detail=f'Processing {len(transactions)} transactions '
                                 f'(support={min_support}, confidence={min_confidence})')
 
@@ -254,15 +265,17 @@ def mining_run():
                 else:
                     miner = AprioriMiner(min_support=min_support, min_confidence=min_confidence)
 
-                results = miner.run_distributed(transactions)
+                results = miner.run_distributed(transactions, progress_callback=on_progress)
                 miner.close()
 
                 n_itemsets = len(results.get('frequent_itemsets', []))
                 n_rules = len(results.get('association_rules', []))
-                p['detail'] = f'Found {n_itemsets} itemsets, {n_rules} rules'
+                p.update(sub_progress=100,
+                         detail=f'Found {n_itemsets} itemsets, {n_rules} rules')
 
                 # Step 3: Save results
-                p.update(step=3, message='Saving mining results...',
+                p.update(step=3, sub_progress=0,
+                         message='Saving mining results...',
                          detail=f'{n_itemsets} itemsets, {n_rules} rules')
 
                 mining_result = MiningResult(
@@ -277,9 +290,11 @@ def mining_run():
                 )
                 db.session.add(mining_result)
                 db.session.commit()
+                p['sub_progress'] = 100
 
                 # Step 4: Generate recommendations
-                p.update(step=4, message='Generating product recommendations...',
+                p.update(step=4, sub_progress=0,
+                         message='Generating product recommendations...',
                          detail='Building recommendation lookup from rules')
 
                 rec_engine = RecommendationEngine()
@@ -287,17 +302,20 @@ def mining_run():
                     results.get('frequent_itemsets', []),
                     results.get('association_rules', []),
                 )
+                p['sub_progress'] = 50
 
-                # Only delete recs for THIS algorithm (keep the other algorithm's recs)
                 Recommendation.query.filter_by(algorithm=algorithm).delete()
                 db.session.commit()
+                p['sub_progress'] = 100
 
                 # Step 5: Save recommendations
-                p.update(step=5, message=f'Saving {algorithm.upper()} recommendations...',
-                         detail=f'{len(rec_engine.recommendations)} products with recs')
+                total_products = len(rec_engine.recommendations)
+                p.update(step=5, sub_progress=0,
+                         message=f'Saving {algorithm.upper()} recommendations...',
+                         detail=f'0 / {total_products} products')
 
                 saved_count = 0
-                for product_name, recs in rec_engine.recommendations.items():
+                for i, (product_name, recs) in enumerate(rec_engine.recommendations.items()):
                     product = Product.query.filter_by(name=product_name).first()
                     if not product:
                         continue
@@ -314,6 +332,13 @@ def mining_run():
                             algorithm=algorithm,
                         ))
                         saved_count += 1
+
+                    # Update sub-progress every 50 products
+                    if i % 50 == 0 or i == total_products - 1:
+                        pct = int((i + 1) / total_products * 100)
+                        p.update(sub_progress=pct,
+                                 detail=f'{i + 1} / {total_products} products '
+                                        f'({saved_count} recs)')
 
                 db.session.commit()
 
@@ -359,7 +384,11 @@ def results():
 
     if result_id:
         result = MiningResult.query.get_or_404(result_id)
-        return render_template('manager_app/results.html', result=result)
+        # Pre-parse JSON so the template gets dicts (not strings)
+        parsed_params = json.loads(result.parameters) if result.parameters else {}
+        parsed_data = json.loads(result.results) if result.results else {}
+        return render_template('manager_app/results.html', result=result,
+                               parsed_params=parsed_params, parsed_data=parsed_data)
 
     all_results = MiningResult.query.order_by(MiningResult.created_at.desc()).all()
     return render_template('manager_app/results.html', results=all_results)

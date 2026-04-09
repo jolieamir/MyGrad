@@ -162,7 +162,8 @@ BEGIN
         [recommended_with_id] [int]   NOT NULL,
         [confidence]          [float] NULL,
         [support]             [float] NULL,
-        [lift]                [float] NULL
+        [lift]                [float] NULL,
+        [algorithm]           [varchar](50) DEFAULT 'fpgrowth'
     ) ON [PRIMARY];
 END
 GO

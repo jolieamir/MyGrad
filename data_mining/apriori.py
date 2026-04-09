@@ -15,13 +15,15 @@ class AprioriMiner:
         self.min_support = min_support
         self.min_confidence = min_confidence
 
-    def run_distributed(self, transactions):
+    def run_distributed(self, transactions, progress_callback=None):
         """Run Apriori. Uses PySpark SON if available, else pure Python.
 
-        Returns:
-            dict with keys 'frequent_itemsets' and 'association_rules'
+        Args:
+            transactions: list[list[str]]
+            progress_callback: optional fn(pct, detail) called with 0-100 progress
         """
-        # Try PySpark first
+        self._cb = progress_callback or (lambda pct, detail=None: None)
+
         try:
             from data_mining.spark_session import get_spark
             spark = get_spark()
@@ -30,7 +32,6 @@ class AprioriMiner:
         except Exception as e:
             print(f"[Apriori] PySpark failed, using pure Python: {e}")
 
-        # Fallback: pure Python
         return self._run_pure_python(transactions)
 
     # ------------------------------------------------------------------
@@ -138,32 +139,46 @@ class AprioriMiner:
             return {'frequent_itemsets': [], 'association_rules': []}
 
         min_count = max(1, int(self.min_support * total))
+        import array
 
-        # Filter transactions to only keep frequent items (massive speedup)
+        # Phase 1: Count item frequencies (10%)
+        self._cb(5, 'Counting item frequencies...')
         item_counts = defaultdict(int)
         for txn in transactions:
             for item in set(txn):
                 item_counts[item] += 1
 
         freq_items = {item for item, cnt in item_counts.items() if cnt >= min_count}
+        self._cb(10, f'{len(freq_items)} frequent items found')
 
-        # Build filtered transactions + inverted index (item -> set of txn indices)
-        txn_sets = []
-        inverted = defaultdict(set)  # item -> {txn_idx, ...}
+        # Phase 2: Map items to integers and build compact inverted index
+        # Uses sorted arrays instead of sets — ~4x less memory
+        self._cb(15, 'Building inverted index...')
+        item_to_id = {item: i for i, item in enumerate(sorted(freq_items))}
+        id_to_item = {i: item for item, i in item_to_id.items()}
+
+        inverted = {}  # int_id -> sorted array of txn indices
         for i, txn in enumerate(transactions):
-            filtered = frozenset(item for item in txn if item in freq_items)
-            txn_sets.append(filtered)
-            for item in filtered:
-                inverted[item].add(i)
+            for item in txn:
+                if item in item_to_id:
+                    iid = item_to_id[item]
+                    if iid not in inverted:
+                        inverted[iid] = []
+                    inverted[iid].append(i)
 
-        # Frequent 1-itemsets
+        # Convert lists to frozensets for fast intersection
+        inv_sets = {iid: frozenset(indices) for iid, indices in inverted.items()}
+        del inverted  # free memory
+        self._cb(20, 'Inverted index built')
+
+        # Phase 3: Frequent 1-itemsets (25%)
         itemset_support = {}
         frequent_itemsets = []
-        freq_1_map = {}  # frozenset -> count
+        freq_1_map = {}
 
         for item in freq_items:
             count = item_counts[item]
-            fs = frozenset([item])
+            fs = frozenset([item_to_id[item]])
             freq_1_map[fs] = count
             support = count / total
             itemset_support[fs] = support
@@ -172,9 +187,10 @@ class AprioriMiner:
                 'freq': count,
                 'support': round(support, 6),
             })
+        self._cb(25, f'{len(freq_1_map)} frequent 1-itemsets')
 
-        # Generate k-itemsets using inverted index for fast counting
-        current_freq = dict(freq_1_map)  # frozenset -> count
+        # Phase 4: Generate k-itemsets using integer IDs (25% -> 75%)
+        current_freq = dict(freq_1_map)
         k = 2
 
         while current_freq:
@@ -190,39 +206,57 @@ class AprioriMiner:
             if not candidates:
                 break
 
-            # Count using inverted index intersection (much faster than scanning all txns)
+            # Count using inverted index intersection (integer IDs)
             next_freq = {}
             for candidate in candidates:
-                items = list(candidate)
-                # Intersect transaction sets for all items in the candidate
-                common_txns = inverted[items[0]]
-                for item in items[1:]:
-                    common_txns = common_txns & inverted[item]
+                int_ids = list(candidate)
+                # Start with smallest set for faster intersection
+                int_ids.sort(key=lambda x: len(inv_sets.get(x, frozenset())))
+                common_txns = inv_sets.get(int_ids[0], frozenset())
+                for iid in int_ids[1:]:
+                    common_txns = common_txns & inv_sets.get(iid, frozenset())
                     if len(common_txns) < min_count:
-                        break  # Early termination
+                        break
 
                 count = len(common_txns)
                 if count >= min_count:
                     support = count / total
                     itemset_support[candidate] = support
+                    # Convert IDs back to item names for output
+                    item_names = sorted([id_to_item[iid] for iid in candidate])
                     frequent_itemsets.append({
-                        'items': sorted(list(candidate)),
+                        'items': item_names,
                         'freq': count,
                         'support': round(support, 6),
                     })
                     next_freq[candidate] = count
 
             current_freq = next_freq
+            k_pct = min(75, 25 + k * 12)
+            self._cb(k_pct, f'Level k={k}: {len(candidates)} candidates, '
+                            f'{len(next_freq)} frequent, '
+                            f'{len(frequent_itemsets)} total itemsets')
             k += 1
 
-        frequent_itemsets.sort(key=lambda x: x['support'], reverse=True)
+        del inv_sets  # free memory
 
-        # Generate association rules
-        association_rules = self._generate_rules(itemset_support)
+        frequent_itemsets.sort(key=lambda x: x['support'], reverse=True)
+        self._cb(75, f'{len(frequent_itemsets)} itemsets found')
+
+        # Phase 5: Generate rules (convert int IDs back to names)
+        self._cb(80, 'Generating association rules...')
+        # Build name-based support lookup for rule generation
+        name_support = {}
+        for fs, sup in itemset_support.items():
+            name_fs = frozenset(id_to_item[iid] for iid in fs)
+            name_support[name_fs] = sup
+        association_rules = self._generate_rules(name_support)
+        self._cb(95, f'{len(association_rules)} rules generated')
 
         print(f"[Apriori] Found {len(frequent_itemsets)} frequent itemsets, "
               f"{len(association_rules)} rules (pure Python)")
 
+        self._cb(100, 'Apriori complete')
         return {'frequent_itemsets': frequent_itemsets, 'association_rules': association_rules}
 
     # ------------------------------------------------------------------

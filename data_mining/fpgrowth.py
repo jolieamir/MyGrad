@@ -13,12 +13,18 @@ class FPGrowthMiner:
         self.min_support = min_support
         self.min_confidence = min_confidence
 
-    def run_distributed(self, transactions):
+    def run_distributed(self, transactions, progress_callback=None):
         """Run FP-Growth. Uses PySpark if available, else pure Python.
+
+        Args:
+            transactions: list[list[str]]
+            progress_callback: optional fn(pct, detail) called with 0-100 progress
 
         Returns:
             dict with keys 'frequent_itemsets' and 'association_rules'
         """
+        self._cb = progress_callback or (lambda pct, detail=None: None)
+
         # Try PySpark first
         try:
             from data_mining.spark_session import get_spark
@@ -89,42 +95,59 @@ class FPGrowthMiner:
 
         min_count = max(1, int(self.min_support * total))
 
-        # Count item frequencies
+        # Phase 1: Count item frequencies (10%)
+        self._cb(5, 'Counting item frequencies...')
         item_counts = defaultdict(int)
         for txn in transactions:
             for item in set(txn):
                 item_counts[item] += 1
 
-        # Filter infrequent items
         freq_items = {item for item, count in item_counts.items() if count >= min_count}
+        self._cb(10, f'{len(freq_items)} frequent items found')
 
-        # Build filtered & sorted transactions
-        def filter_and_sort(txn):
-            filtered = [item for item in txn if item in freq_items]
-            filtered.sort(key=lambda x: (-item_counts[x], x))
-            return filtered
+        # Map items to integers (saves memory in tree nodes)
+        item_to_id = {}
+        id_to_item = {}
+        for i, item in enumerate(sorted(freq_items, key=lambda x: -item_counts[x])):
+            item_to_id[item] = i
+            id_to_item[i] = item
 
-        sorted_txns = [filter_and_sort(txn) for txn in transactions]
+        # Phase 2: Build filtered transactions with integer IDs (20%)
+        sorted_txns = []
+        for txn in transactions:
+            filtered = [item_to_id[item] for item in txn if item in item_to_id]
+            filtered.sort()  # IDs already sorted by frequency
+            if filtered:
+                sorted_txns.append(filtered)
+        del transactions  # free original list
+        self._cb(20, 'Transactions filtered and sorted')
 
-        # Build FP-Tree
+        # Phase 3: Build FP-Tree (35%)
+        self._cb(25, 'Building FP-Tree...')
         root, header_table = self._build_fp_tree(sorted_txns, min_count)
+        self._cb(35, f'FP-Tree built ({len(header_table)} nodes)')
 
-        # Mine frequent patterns
+        # Phase 4: Mine frequent patterns (70%)
+        self._cb(40, 'Mining frequent patterns...')
         patterns = {}
         self._mine_tree(header_table, min_count, set(), patterns)
+        self._cb(70, f'{len(patterns)} patterns mined')
 
-        # Build results
+        del sorted_txns  # free memory
+
+        # Build results — convert integer IDs back to item names
         frequent_itemsets = []
-        itemset_support = {}
+        itemset_support = {}  # frozenset of names -> support
         for itemset_tuple, count in patterns.items():
             support = count / total
-            fs = frozenset(itemset_tuple)
-            itemset_support[fs] = support
+            name_set = frozenset(id_to_item[iid] for iid in itemset_tuple)
+            itemset_support[name_set] = support
             frequent_itemsets.append({
-                'items': sorted(list(itemset_tuple)),
+                'items': sorted([id_to_item[iid] for iid in itemset_tuple]),
                 'freq': count,
                 'support': round(support, 6),
             })
+        del patterns  # free memory
 
         # Add single items (only if not already found by tree mining)
         for item, count in item_counts.items():
@@ -140,14 +163,18 @@ class FPGrowthMiner:
                     })
 
         frequent_itemsets.sort(key=lambda x: x['support'], reverse=True)
+        self._cb(75, f'{len(frequent_itemsets)} itemsets compiled')
 
-        # Generate association rules
+        # Phase 5: Generate association rules (95%)
+        self._cb(80, 'Generating association rules...')
         association_rules = self._generate_rules(itemset_support)
         association_rules.sort(key=lambda x: x['lift'], reverse=True)
+        self._cb(95, f'{len(association_rules)} rules generated')
 
         print(f"[FP-Growth] Found {len(frequent_itemsets)} frequent itemsets, "
               f"{len(association_rules)} rules (pure Python)")
 
+        self._cb(100, 'FP-Growth complete')
         return {'frequent_itemsets': frequent_itemsets, 'association_rules': association_rules}
 
     def _build_fp_tree(self, transactions, min_count):

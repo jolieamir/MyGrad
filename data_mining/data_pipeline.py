@@ -61,12 +61,17 @@ class DataPipeline:
             conn.commit()
             print("[Pipeline] Truncated Row_data and Cleaned_data")
 
-            # --- Step 2: Load CSV and insert into Row_data ---
-            df = pd.read_csv(csv_path, encoding='utf-8-sig', low_memory=False)
-            print(f"[Pipeline] Loaded CSV: {len(df)} rows, columns: {list(df.columns)}")
+            # --- Step 2: Load CSV in chunks and insert into Row_data ---
+            raw_count = 0
+            first_chunk = True
+            for chunk in pd.read_csv(csv_path, encoding='utf-8-sig',
+                                     chunksize=50000, low_memory=False):
+                if first_chunk:
+                    print(f"[Pipeline] CSV columns: {list(chunk.columns)}")
+                    first_chunk = False
+                raw_count += self._insert_into_row_data(cursor, chunk)
+                conn.commit()
 
-            raw_count = self._insert_into_row_data(cursor, df)
-            conn.commit()
             print(f"[Pipeline] Inserted {raw_count} rows into Row_data")
 
             # --- Step 3: Copy Row_data -> Cleaned_data ---

@@ -84,25 +84,55 @@
 
                     <!-- Step list -->
                     <div class="list-group mb-3" id="stepList">
-                        <div class="list-group-item d-flex align-items-center" id="step1">
-                            <span class="me-3 step-icon"><i class="far fa-circle text-muted"></i></span>
-                            <span>Load transactions from SQL Server</span>
+                        <div class="list-group-item" id="step1">
+                            <div class="d-flex align-items-center">
+                                <span class="me-3 step-icon"><i class="far fa-circle text-muted"></i></span>
+                                <span class="flex-grow-1">Load transactions from SQL Server</span>
+                                <small class="text-muted step-sub-pct" id="step1pct"></small>
+                            </div>
+                            <div class="progress mt-1 step-sub-bar" id="step1bar" style="height:4px;display:none;">
+                                <div class="progress-bar bg-info" style="width:0%"></div>
+                            </div>
                         </div>
-                        <div class="list-group-item d-flex align-items-center" id="step2">
-                            <span class="me-3 step-icon"><i class="far fa-circle text-muted"></i></span>
-                            <span>Run mining algorithm</span>
+                        <div class="list-group-item" id="step2">
+                            <div class="d-flex align-items-center">
+                                <span class="me-3 step-icon"><i class="far fa-circle text-muted"></i></span>
+                                <span class="flex-grow-1">Run mining algorithm</span>
+                                <small class="text-muted step-sub-pct" id="step2pct"></small>
+                            </div>
+                            <div class="progress mt-1 step-sub-bar" id="step2bar" style="height:4px;display:none;">
+                                <div class="progress-bar bg-info" style="width:0%"></div>
+                            </div>
                         </div>
-                        <div class="list-group-item d-flex align-items-center" id="step3">
-                            <span class="me-3 step-icon"><i class="far fa-circle text-muted"></i></span>
-                            <span>Save mining results</span>
+                        <div class="list-group-item" id="step3">
+                            <div class="d-flex align-items-center">
+                                <span class="me-3 step-icon"><i class="far fa-circle text-muted"></i></span>
+                                <span class="flex-grow-1">Save mining results</span>
+                                <small class="text-muted step-sub-pct" id="step3pct"></small>
+                            </div>
+                            <div class="progress mt-1 step-sub-bar" id="step3bar" style="height:4px;display:none;">
+                                <div class="progress-bar bg-info" style="width:0%"></div>
+                            </div>
                         </div>
-                        <div class="list-group-item d-flex align-items-center" id="step4">
-                            <span class="me-3 step-icon"><i class="far fa-circle text-muted"></i></span>
-                            <span>Generate recommendations</span>
+                        <div class="list-group-item" id="step4">
+                            <div class="d-flex align-items-center">
+                                <span class="me-3 step-icon"><i class="far fa-circle text-muted"></i></span>
+                                <span class="flex-grow-1">Generate recommendations</span>
+                                <small class="text-muted step-sub-pct" id="step4pct"></small>
+                            </div>
+                            <div class="progress mt-1 step-sub-bar" id="step4bar" style="height:4px;display:none;">
+                                <div class="progress-bar bg-info" style="width:0%"></div>
+                            </div>
                         </div>
-                        <div class="list-group-item d-flex align-items-center" id="step5">
-                            <span class="me-3 step-icon"><i class="far fa-circle text-muted"></i></span>
-                            <span>Save recommendations</span>
+                        <div class="list-group-item" id="step5">
+                            <div class="d-flex align-items-center">
+                                <span class="me-3 step-icon"><i class="far fa-circle text-muted"></i></span>
+                                <span class="flex-grow-1">Save recommendations</span>
+                                <small class="text-muted step-sub-pct" id="step5pct"></small>
+                            </div>
+                            <div class="progress mt-1 step-sub-bar" id="step5bar" style="height:4px;display:none;">
+                                <div class="progress-bar bg-info" style="width:0%"></div>
+                            </div>
                         </div>
                     </div>
 
@@ -183,21 +213,41 @@ function pollStatus() {
         .then(function(r) { return r.json(); })
         .then(function(data) {
             var step = data.step || 0;
-            var pct = Math.round((step / data.total_steps) * 100);
+            var subPct = data.sub_progress || 0;
 
-            updateProgress(pct, data.message);
+            // Overall progress: each step is 20%, sub_progress fills within
+            var overallPct = Math.round(((step - 1) / data.total_steps) * 100 + (subPct / data.total_steps));
+            overallPct = Math.min(100, Math.max(0, overallPct));
+
+            updateProgress(overallPct, data.message);
             document.getElementById('statusDetail').textContent = data.detail || '';
             document.getElementById('stepText').textContent = 'Step ' + step + '/' + data.total_steps;
 
-            // Update step icons
+            // Update step icons and sub-progress bars
             for (var i = 1; i <= 5; i++) {
                 var icon = document.querySelector('#step' + i + ' .step-icon');
+                var bar = document.getElementById('step' + i + 'bar');
+                var pctLabel = document.getElementById('step' + i + 'pct');
+
                 if (i < step) {
+                    // Completed step
                     icon.innerHTML = '<i class="fas fa-check-circle text-success"></i>';
+                    bar.style.display = 'block';
+                    bar.querySelector('.progress-bar').style.width = '100%';
+                    bar.querySelector('.progress-bar').className = 'progress-bar bg-success';
+                    pctLabel.textContent = '100%';
                 } else if (i === step) {
+                    // Active step — show sub-progress
                     icon.innerHTML = '<i class="fas fa-spinner fa-spin text-primary"></i>';
+                    bar.style.display = 'block';
+                    bar.querySelector('.progress-bar').style.width = subPct + '%';
+                    bar.querySelector('.progress-bar').className = 'progress-bar bg-info progress-bar-striped progress-bar-animated';
+                    pctLabel.textContent = subPct + '%';
                 } else {
+                    // Future step
                     icon.innerHTML = '<i class="far fa-circle text-muted"></i>';
+                    bar.style.display = 'none';
+                    pctLabel.textContent = '';
                 }
             }
 
@@ -208,10 +258,15 @@ function pollStatus() {
                 if (data.error) {
                     showError(data.error);
                 } else {
-                    // All steps complete
                     for (var i = 1; i <= 5; i++) {
                         var icon = document.querySelector('#step' + i + ' .step-icon');
+                        var bar = document.getElementById('step' + i + 'bar');
+                        var pctLabel = document.getElementById('step' + i + 'pct');
                         icon.innerHTML = '<i class="fas fa-check-circle text-success"></i>';
+                        bar.style.display = 'block';
+                        bar.querySelector('.progress-bar').style.width = '100%';
+                        bar.querySelector('.progress-bar').className = 'progress-bar bg-success';
+                        pctLabel.textContent = '100%';
                     }
                     updateProgress(100, 'Complete!');
 
@@ -228,7 +283,7 @@ function pollStatus() {
                 }
             }
         })
-        .catch(function() {}); // ignore transient poll errors
+        .catch(function() {});
 }
 
 function updateProgress(pct, label) {
