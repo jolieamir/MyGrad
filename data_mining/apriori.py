@@ -15,13 +15,15 @@ class AprioriMiner:
         self.min_support = min_support
         self.min_confidence = min_confidence
 
-    def run_distributed(self, transactions):
+    def run_distributed(self, transactions, progress_callback=None):
         """Run Apriori. Uses PySpark SON if available, else pure Python.
 
-        Returns:
-            dict with keys 'frequent_itemsets' and 'association_rules'
+        Args:
+            transactions: list[list[str]]
+            progress_callback: optional fn(pct, detail) called with 0-100 progress
         """
-        # Try PySpark first
+        self._cb = progress_callback or (lambda pct, detail=None: None)
+
         try:
             from data_mining.spark_session import get_spark
             spark = get_spark()
@@ -30,7 +32,6 @@ class AprioriMiner:
         except Exception as e:
             print(f"[Apriori] PySpark failed, using pure Python: {e}")
 
-        # Fallback: pure Python
         return self._run_pure_python(transactions)
 
     # ------------------------------------------------------------------
@@ -139,27 +140,31 @@ class AprioriMiner:
 
         min_count = max(1, int(self.min_support * total))
 
-        # Filter transactions to only keep frequent items (massive speedup)
+        # Phase 1: Count item frequencies (10%)
+        self._cb(5, 'Counting item frequencies...')
         item_counts = defaultdict(int)
         for txn in transactions:
             for item in set(txn):
                 item_counts[item] += 1
 
         freq_items = {item for item, cnt in item_counts.items() if cnt >= min_count}
+        self._cb(10, f'{len(freq_items)} frequent items found')
 
-        # Build filtered transactions + inverted index (item -> set of txn indices)
+        # Phase 2: Build inverted index (20%)
+        self._cb(15, 'Building inverted index...')
         txn_sets = []
-        inverted = defaultdict(set)  # item -> {txn_idx, ...}
+        inverted = defaultdict(set)
         for i, txn in enumerate(transactions):
             filtered = frozenset(item for item in txn if item in freq_items)
             txn_sets.append(filtered)
             for item in filtered:
                 inverted[item].add(i)
+        self._cb(20, 'Inverted index built')
 
-        # Frequent 1-itemsets
+        # Phase 3: Frequent 1-itemsets (25%)
         itemset_support = {}
         frequent_itemsets = []
-        freq_1_map = {}  # frozenset -> count
+        freq_1_map = {}
 
         for item in freq_items:
             count = item_counts[item]
@@ -172,9 +177,10 @@ class AprioriMiner:
                 'freq': count,
                 'support': round(support, 6),
             })
+        self._cb(25, f'{len(freq_1_map)} frequent 1-itemsets')
 
-        # Generate k-itemsets using inverted index for fast counting
-        current_freq = dict(freq_1_map)  # frozenset -> count
+        # Phase 4: Generate k-itemsets (25% -> 75%)
+        current_freq = dict(freq_1_map)
         k = 2
 
         while current_freq:
@@ -213,16 +219,25 @@ class AprioriMiner:
                     next_freq[candidate] = count
 
             current_freq = next_freq
+            # Progress: k=2 is ~30%, k=3 is ~50%, k=4+ is ~65%
+            k_pct = min(75, 25 + k * 12)
+            self._cb(k_pct, f'Level k={k}: {len(candidates)} candidates, '
+                            f'{len(next_freq)} frequent, '
+                            f'{len(frequent_itemsets)} total itemsets')
             k += 1
 
         frequent_itemsets.sort(key=lambda x: x['support'], reverse=True)
+        self._cb(75, f'{len(frequent_itemsets)} itemsets found')
 
-        # Generate association rules
+        # Phase 5: Generate association rules (75% -> 95%)
+        self._cb(80, 'Generating association rules...')
         association_rules = self._generate_rules(itemset_support)
+        self._cb(95, f'{len(association_rules)} rules generated')
 
         print(f"[Apriori] Found {len(frequent_itemsets)} frequent itemsets, "
               f"{len(association_rules)} rules (pure Python)")
 
+        self._cb(100, 'Apriori complete')
         return {'frequent_itemsets': frequent_itemsets, 'association_rules': association_rules}
 
     # ------------------------------------------------------------------
