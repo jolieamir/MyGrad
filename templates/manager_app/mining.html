@@ -6,7 +6,7 @@
 <div class="row justify-content-center">
     <div class="col-lg-8">
         <h2><i class="fas fa-chart-line"></i> Run Data Mining</h2>
-        
+
         <div class="card">
             <div class="card-body">
                 {% with messages = get_flashed_messages(with_categories=true) %}
@@ -16,17 +16,18 @@
                         {% endfor %}
                     {% endif %}
                 {% endwith %}
-                
-                <form method="POST">
+
+                <!-- Config Form -->
+                <div id="configPanel">
                     <div class="row">
                         <div class="col-md-6">
                             <div class="mb-3">
                                 <label for="algorithm" class="form-label">Algorithm</label>
                                 <select class="form-select" id="algorithm" name="algorithm">
-                                    <option value="fpgrowth" selected>FP-Growth</option>
+                                    <option value="fpgrowth" selected>FP-Growth (Recommended)</option>
                                     <option value="apriori">Apriori (SON)</option>
                                 </select>
-                                <div class="form-text">FP-Growth is generally faster and recommended for large datasets.</div>
+                                <div class="form-text">FP-Growth is faster. Both produce the same rules.</div>
                             </div>
                         </div>
                         <div class="col-md-6">
@@ -34,52 +35,240 @@
                                 <label for="min_support" class="form-label">Minimum Support</label>
                                 <select class="form-select" id="min_support" name="min_support">
                                     {% for support in min_support_options %}
-                                        <option value="{{ support }}">{{ support }}</option>
+                                        <option value="{{ support }}" {% if support == 0.01 %}selected{% endif %}>{{ support }} ({{ (support * 100)|round(1) }}%)</option>
                                     {% endfor %}
                                 </select>
-                                <div class="form-text">
-                                    <strong>Recommended values for your dataset:</strong><br>
-                                    • 0.001 (0.1%): ~18+ transactions - Many patterns<br>
-                                    • 0.002 (0.2%): ~37+ transactions - Good balance<br>
-                                    • 0.005 (0.5%): ~92+ transactions - Fewer but stronger<br>
-                                    • 0.01 (1%): ~185+ transactions - Very strong patterns
-                                </div>
                             </div>
                         </div>
                     </div>
-                    
+
                     <div class="row">
                         <div class="col-md-6">
                             <div class="mb-3">
                                 <label for="min_confidence" class="form-label">Minimum Confidence</label>
                                 <select class="form-select" id="min_confidence" name="min_confidence">
                                     {% for confidence in min_confidence_options %}
-                                        <option value="{{ confidence }}">{{ confidence }}</option>
+                                        <option value="{{ confidence }}" {% if confidence == 0.5 %}selected{% endif %}>{{ confidence }} ({{ (confidence * 100)|round(0)|int }}%)</option>
                                     {% endfor %}
                                 </select>
-                                <div class="form-text">
-                                    <strong>Recommended values:</strong><br>
-                                    • 0.1-0.3: Weak associations (more results)<br>
-                                    • 0.4-0.6: Moderate associations (balanced)<br>
-                                    • 0.7-0.8: Strong associations (fewer results)
-                                </div>
                             </div>
                         </div>
                     </div>
-                    
-                    <div class="alert alert-info">
-                        <i class="fas fa-info-circle"></i>
-                        <strong>For your dataset:</strong> Start with min_support=0.01 and min_confidence=0.5.
-                        This will find patterns that occur in at least 1% of transactions with 50% confidence.
-                    </div>
-                    
-                    <button type="submit" class="btn btn-primary">
+
+                    <button class="btn btn-primary btn-lg" id="runBtn" onclick="startMining()">
                         <i class="fas fa-play"></i> Run Mining
                     </button>
-                    <a href="{{ url_for('manager_app.dashboard') }}" class="btn btn-secondary">Cancel</a>
-                </form>
+                    <a href="{{ url_for('manager_app.dashboard') }}" class="btn btn-secondary btn-lg">Cancel</a>
+                </div>
+
+                <!-- Progress Panel (hidden initially) -->
+                <div id="progressPanel" style="display:none;">
+                    <div class="text-center mb-4">
+                        <h4 id="statusMessage" class="mb-1">Starting...</h4>
+                        <p class="text-muted mb-3" id="statusDetail"></p>
+                    </div>
+
+                    <!-- Step indicators -->
+                    <div class="mb-4">
+                        <div class="d-flex justify-content-between mb-2">
+                            <small class="text-muted">Progress</small>
+                            <small class="text-muted"><span id="stepText">Step 0/5</span> &mdash; <span id="elapsed">0s</span></small>
+                        </div>
+                        <div class="progress" style="height: 24px;">
+                            <div id="progressBar" class="progress-bar progress-bar-striped progress-bar-animated"
+                                 role="progressbar" style="width: 0%; font-size: 0.85rem;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
+                                0%
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Step list -->
+                    <div class="list-group mb-3" id="stepList">
+                        <div class="list-group-item d-flex align-items-center" id="step1">
+                            <span class="me-3 step-icon"><i class="far fa-circle text-muted"></i></span>
+                            <span>Load transactions from SQL Server</span>
+                        </div>
+                        <div class="list-group-item d-flex align-items-center" id="step2">
+                            <span class="me-3 step-icon"><i class="far fa-circle text-muted"></i></span>
+                            <span>Run mining algorithm</span>
+                        </div>
+                        <div class="list-group-item d-flex align-items-center" id="step3">
+                            <span class="me-3 step-icon"><i class="far fa-circle text-muted"></i></span>
+                            <span>Save mining results</span>
+                        </div>
+                        <div class="list-group-item d-flex align-items-center" id="step4">
+                            <span class="me-3 step-icon"><i class="far fa-circle text-muted"></i></span>
+                            <span>Generate recommendations</span>
+                        </div>
+                        <div class="list-group-item d-flex align-items-center" id="step5">
+                            <span class="me-3 step-icon"><i class="far fa-circle text-muted"></i></span>
+                            <span>Save recommendations</span>
+                        </div>
+                    </div>
+
+                    <!-- Done / Error panel -->
+                    <div id="donePanel" style="display:none;">
+                        <div class="alert alert-success" id="successAlert" style="display:none;">
+                            <i class="fas fa-check-circle"></i> <strong id="doneMessage"></strong>
+                            <p class="mb-0 mt-1" id="doneDetail"></p>
+                        </div>
+                        <div class="alert alert-danger" id="errorAlert" style="display:none;">
+                            <i class="fas fa-exclamation-circle"></i> <strong>Error:</strong> <span id="errorMessage"></span>
+                        </div>
+                        <a id="viewResultsBtn" href="#" class="btn btn-success" style="display:none;">
+                            <i class="fas fa-table"></i> View Results
+                        </a>
+                        <button class="btn btn-primary" onclick="resetForm()">
+                            <i class="fas fa-redo"></i> Run Again
+                        </button>
+                        <a href="{{ url_for('manager_app.dashboard') }}" class="btn btn-secondary">Dashboard</a>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
 </div>
+
+<script>
+var pollTimer = null;
+var elapsedTimer = null;
+var startTime = null;
+
+function startMining() {
+    var algo = document.getElementById('algorithm').value;
+    var support = document.getElementById('min_support').value;
+    var confidence = document.getElementById('min_confidence').value;
+
+    // Hide config, show progress
+    document.getElementById('configPanel').style.display = 'none';
+    document.getElementById('progressPanel').style.display = 'block';
+    document.getElementById('donePanel').style.display = 'none';
+
+    // Reset steps
+    for (var i = 1; i <= 5; i++) {
+        var el = document.querySelector('#step' + i + ' .step-icon');
+        el.innerHTML = '<i class="far fa-circle text-muted"></i>';
+    }
+    updateProgress(0, 'Starting...');
+
+    // Start elapsed counter
+    startTime = Date.now();
+    elapsedTimer = setInterval(function() {
+        var secs = Math.floor((Date.now() - startTime) / 1000);
+        var m = Math.floor(secs / 60);
+        var s = secs % 60;
+        document.getElementById('elapsed').textContent = m > 0 ? m + 'm ' + s + 's' : s + 's';
+    }, 500);
+
+    // POST to start mining
+    var formData = new FormData();
+    formData.append('algorithm', algo);
+    formData.append('min_support', support);
+    formData.append('min_confidence', confidence);
+
+    fetch('{{ url_for("manager_app.mining_run") }}', {method: 'POST', body: formData})
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.error) {
+                showError(data.error);
+            } else {
+                pollTimer = setInterval(pollStatus, 500);
+            }
+        })
+        .catch(function(err) { showError(err.toString()); });
+}
+
+function pollStatus() {
+    fetch('{{ url_for("manager_app.mining_status") }}')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var step = data.step || 0;
+            var pct = Math.round((step / data.total_steps) * 100);
+
+            updateProgress(pct, data.message);
+            document.getElementById('statusDetail').textContent = data.detail || '';
+            document.getElementById('stepText').textContent = 'Step ' + step + '/' + data.total_steps;
+
+            // Update step icons
+            for (var i = 1; i <= 5; i++) {
+                var icon = document.querySelector('#step' + i + ' .step-icon');
+                if (i < step) {
+                    icon.innerHTML = '<i class="fas fa-check-circle text-success"></i>';
+                } else if (i === step) {
+                    icon.innerHTML = '<i class="fas fa-spinner fa-spin text-primary"></i>';
+                } else {
+                    icon.innerHTML = '<i class="far fa-circle text-muted"></i>';
+                }
+            }
+
+            if (data.done) {
+                clearInterval(pollTimer);
+                clearInterval(elapsedTimer);
+
+                if (data.error) {
+                    showError(data.error);
+                } else {
+                    // All steps complete
+                    for (var i = 1; i <= 5; i++) {
+                        var icon = document.querySelector('#step' + i + ' .step-icon');
+                        icon.innerHTML = '<i class="fas fa-check-circle text-success"></i>';
+                    }
+                    updateProgress(100, 'Complete!');
+
+                    document.getElementById('donePanel').style.display = 'block';
+                    document.getElementById('successAlert').style.display = 'block';
+                    document.getElementById('doneMessage').textContent = data.message;
+                    document.getElementById('doneDetail').textContent = data.detail;
+
+                    if (data.result_id) {
+                        var btn = document.getElementById('viewResultsBtn');
+                        btn.href = '{{ url_for("manager_app.results") }}?result_id=' + data.result_id;
+                        btn.style.display = 'inline-block';
+                    }
+                }
+            }
+        })
+        .catch(function() {}); // ignore transient poll errors
+}
+
+function updateProgress(pct, label) {
+    var bar = document.getElementById('progressBar');
+    bar.style.width = pct + '%';
+    bar.textContent = pct + '%';
+    bar.setAttribute('aria-valuenow', pct);
+    document.getElementById('statusMessage').textContent = label || '';
+
+    if (pct >= 100) {
+        bar.classList.remove('progress-bar-animated');
+        bar.classList.add('bg-success');
+    }
+}
+
+function showError(msg) {
+    clearInterval(pollTimer);
+    clearInterval(elapsedTimer);
+    var bar = document.getElementById('progressBar');
+    bar.classList.remove('progress-bar-animated');
+    bar.classList.add('bg-danger');
+
+    document.getElementById('donePanel').style.display = 'block';
+    document.getElementById('errorAlert').style.display = 'block';
+    document.getElementById('errorMessage').textContent = msg;
+}
+
+function resetForm() {
+    document.getElementById('configPanel').style.display = 'block';
+    document.getElementById('progressPanel').style.display = 'none';
+    document.getElementById('donePanel').style.display = 'none';
+    document.getElementById('successAlert').style.display = 'none';
+    document.getElementById('errorAlert').style.display = 'none';
+    document.getElementById('viewResultsBtn').style.display = 'none';
+
+    var bar = document.getElementById('progressBar');
+    bar.style.width = '0%';
+    bar.textContent = '0%';
+    bar.classList.remove('bg-success', 'bg-danger');
+    bar.classList.add('progress-bar-animated');
+}
+</script>
 {% endblock %}

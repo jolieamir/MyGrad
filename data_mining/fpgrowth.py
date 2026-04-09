@@ -1,142 +1,264 @@
 """
 FP-Growth Algorithm Module
-Distributed FP-Growth implementation using PySpark.
-Refactored from your existing fp_growth() and parallel_fpgrowth() functions.
+
+Primary: PySpark MLlib FPGrowth (distributed, if available)
+Fallback: Pure-Python FP-Growth implementation (single-machine)
 """
 
-import os
-import json
-from collections import defaultdict
-from pyspark.sql import SparkSession
-from pyspark.sql import Row
-from pyspark.ml.fpm import FPGrowth as SparkFPGrowth
+from collections import defaultdict, OrderedDict
+
 
 class FPGrowthMiner:
     def __init__(self, min_support=0.01, min_confidence=0.5):
-        """Initialize FP-Growth miner with parameters."""
         self.min_support = min_support
         self.min_confidence = min_confidence
-        self.spark = None
-    
-    def _get_spark_session(self):
-        """Get or create Spark session."""
-        if self.spark is None:
-            self.spark = SparkSession.builder \
-                .appName("FPGrowthMining") \
-                .master("local[*]") \
-                .config("spark.driver.memory", "4g") \
-                .config("spark.sql.adaptive.enabled", "true") \
-                .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
-                .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
-                .getOrCreate()
-        return self.spark
-    
-    
+
     def run_distributed(self, transactions):
-        """Run FP-Growth using PySpark ML (distributed)."""
-        spark = self._get_spark_session()
-        
-        # Convert transactions to DataFrame
+        """Run FP-Growth. Uses PySpark if available, else pure Python.
+
+        Returns:
+            dict with keys 'frequent_itemsets' and 'association_rules'
+        """
+        # Try PySpark first
+        try:
+            from data_mining.spark_session import get_spark
+            spark = get_spark()
+            if spark is not None:
+                return self._run_pyspark(spark, transactions)
+        except Exception as e:
+            print(f"[FP-Growth] PySpark failed, using pure Python: {e}")
+
+        # Fallback: pure Python
+        return self._run_pure_python(transactions)
+
+    # ------------------------------------------------------------------
+    # PySpark implementation
+    # ------------------------------------------------------------------
+    def _run_pyspark(self, spark, transactions):
+        from pyspark.sql import Row
+        from pyspark.ml.fpm import FPGrowth as SparkFPGrowth
+
+        total = len(transactions)
         rows = [Row(items=list(t)) for t in transactions]
         df = spark.createDataFrame(rows)
-        
-        # Run FP-Growth
-        fp = SparkFPGrowth(
-            itemsCol="items",
-            minSupport=self.min_support,
-            minConfidence=self.min_confidence
-        )
-        
+        df = df.repartition(max(4, spark.sparkContext.defaultParallelism))
+        df.cache()
+
+        fp = SparkFPGrowth(itemsCol="items", minSupport=self.min_support,
+                           minConfidence=self.min_confidence)
         model = fp.fit(df)
-        
-        # Get frequent itemsets
-        frequent_itemsets = model.freqItemsets.collect()
-        
-        # Get association rules
-        association_rules = model.associationRules.collect()
-        
-        # Format results
-        results = {
-            'frequent_itemsets': [],
-            'association_rules': []
-        }
-        
-        for itemset in frequent_itemsets:
-            results['frequent_itemsets'].append({
-                'items': itemset['items'],
-                'freq': itemset['freq']
+
+        raw_itemsets = model.freqItemsets.collect()
+        support_lookup = {}
+        frequent_itemsets = []
+        for row in raw_itemsets:
+            freq = row['freq']
+            support = freq / total
+            support_lookup[frozenset(row['items'])] = support
+            frequent_itemsets.append({
+                'items': sorted(row['items']),
+                'freq': freq,
+                'support': round(support, 6),
             })
-        
-        for rule in association_rules:
-            results['association_rules'].append({
-                'antecedents': rule['antecedents'],
-                'consequents': rule['consequents'],
-                'confidence': rule['confidence'],
-                'lift': rule['lift']
+        frequent_itemsets.sort(key=lambda x: x['support'], reverse=True)
+
+        raw_rules = model.associationRules.collect()
+        association_rules = []
+        for row in raw_rules:
+            ant_support = support_lookup.get(frozenset(row['antecedent']), 0)
+            confidence = float(row['confidence'])
+            association_rules.append({
+                'antecedents': sorted(row['antecedent']),
+                'consequents': sorted(row['consequent']),
+                'confidence': round(confidence, 6),
+                'support': round(confidence * ant_support, 6),
+                'lift': round(float(row['lift']), 4),
             })
-        
-        return results
-    
-    def run_distributed_filtered(self, transactions, min_itemset_size=2):
-        """Run FP-Growth and filter by itemset size."""
-        spark = self._get_spark_session()
-        
-        # Convert transactions to DataFrame
-        rows = [Row(items=list(t)) for t in transactions]
-        df = spark.createDataFrame(rows)
-        
-        # Run FP-Growth
-        fp = SparkFPGrowth(
-            itemsCol="items",
-            minSupport=self.min_support,
-            minConfidence=self.min_confidence
-        )
-        
-        model = fp.fit(df)
-        
-        # Filter itemsets by size
-        filtered_itemsets = model.freqItemsets.filter(f"size(items) >= {min_itemset_size}").collect()
-        
-        # Format results
-        results = []
-        for itemset in filtered_itemsets:
-            results.append({
-                'items': itemset['items'],
-                'freq': itemset['freq'],
-                'support': itemset['freq'] / len(transactions) if transactions else 0
+        association_rules.sort(key=lambda x: x['lift'], reverse=True)
+
+        df.unpersist()
+        return {'frequent_itemsets': frequent_itemsets, 'association_rules': association_rules}
+
+    # ------------------------------------------------------------------
+    # Pure-Python FP-Growth implementation
+    # ------------------------------------------------------------------
+    def _run_pure_python(self, transactions):
+        total = len(transactions)
+        if total == 0:
+            return {'frequent_itemsets': [], 'association_rules': []}
+
+        min_count = max(1, int(self.min_support * total))
+
+        # Count item frequencies
+        item_counts = defaultdict(int)
+        for txn in transactions:
+            for item in set(txn):
+                item_counts[item] += 1
+
+        # Filter infrequent items
+        freq_items = {item for item, count in item_counts.items() if count >= min_count}
+
+        # Build filtered & sorted transactions
+        def filter_and_sort(txn):
+            filtered = [item for item in txn if item in freq_items]
+            filtered.sort(key=lambda x: (-item_counts[x], x))
+            return filtered
+
+        sorted_txns = [filter_and_sort(txn) for txn in transactions]
+
+        # Build FP-Tree
+        root, header_table = self._build_fp_tree(sorted_txns, min_count)
+
+        # Mine frequent patterns
+        patterns = {}
+        self._mine_tree(header_table, min_count, set(), patterns)
+
+        # Build results
+        frequent_itemsets = []
+        itemset_support = {}
+        for itemset_tuple, count in patterns.items():
+            support = count / total
+            fs = frozenset(itemset_tuple)
+            itemset_support[fs] = support
+            frequent_itemsets.append({
+                'items': sorted(list(itemset_tuple)),
+                'freq': count,
+                'support': round(support, 6),
             })
-        
-        return results
-    
-    def generate_recommendations(self, frequent_itemsets, top_n=5):
-        """Generate product recommendations from frequent itemsets."""
-        recommendations = {}
-        
-        for itemset_info in frequent_itemsets:
-            items = itemset_info['items']
-            support = itemset_info.get('support', 0)
-            
-            # For each item in the itemset, recommend other items
-            for item in items:
-                if item not in recommendations:
-                    recommendations[item] = []
-                
-                other_items = [i for i in items if i != item]
-                for other_item in other_items:
-                    recommendations[item].append({
-                        'recommended_with': other_item,
-                        'support': support,
-                        'items_together': items
+
+        # Add single items (only if not already found by tree mining)
+        for item, count in item_counts.items():
+            if count >= min_count:
+                fs = frozenset([item])
+                if fs not in itemset_support:
+                    support = count / total
+                    itemset_support[fs] = support
+                    frequent_itemsets.append({
+                        'items': [item],
+                        'freq': count,
+                        'support': round(support, 6),
                     })
-        
-        # Sort by support and limit
-        for item in recommendations:
-            recommendations[item].sort(key=lambda x: x['support'], reverse=True)
-            recommendations[item] = recommendations[item][:top_n]
-        
-        return recommendations
-    
-    def __del__(self):
-        """Clean up Spark session."""
-        if self.spark:
-            self.spark.stop()
+
+        frequent_itemsets.sort(key=lambda x: x['support'], reverse=True)
+
+        # Generate association rules
+        association_rules = self._generate_rules(itemset_support)
+        association_rules.sort(key=lambda x: x['lift'], reverse=True)
+
+        print(f"[FP-Growth] Found {len(frequent_itemsets)} frequent itemsets, "
+              f"{len(association_rules)} rules (pure Python)")
+
+        return {'frequent_itemsets': frequent_itemsets, 'association_rules': association_rules}
+
+    def _build_fp_tree(self, transactions, min_count):
+        root = _FPNode(None, None)
+        header_table = {}
+
+        for txn in transactions:
+            current = root
+            for item in txn:
+                child = current.children.get(item)
+                if child is None:
+                    child = _FPNode(item, current)
+                    current.children[item] = child
+                    # Update header table
+                    if item in header_table:
+                        last = header_table[item]
+                        while last.next is not None:
+                            last = last.next
+                        last.next = child
+                    else:
+                        header_table[item] = child
+                child.count += 1
+                current = child
+
+        return root, header_table
+
+    def _mine_tree(self, header_table, min_count, prefix, patterns):
+        # Sort items by frequency (ascending for bottom-up mining)
+        sorted_items = sorted(header_table.keys(),
+                              key=lambda x: self._count_support(header_table[x]))
+
+        for item in sorted_items:
+            new_prefix = prefix | {item}
+            support = self._count_support(header_table[item])
+            if support >= min_count:
+                patterns[tuple(sorted(new_prefix))] = support
+
+                # Build conditional pattern base
+                cond_patterns = []
+                node = header_table[item]
+                while node is not None:
+                    prefix_path = []
+                    parent = node.parent
+                    while parent is not None and parent.item is not None:
+                        prefix_path.append(parent.item)
+                        parent = parent.parent
+                    if prefix_path:
+                        for _ in range(node.count):
+                            cond_patterns.append(prefix_path)
+                    node = node.next
+
+                # Build conditional FP-tree
+                if cond_patterns:
+                    cond_root, cond_header = self._build_fp_tree(cond_patterns, min_count)
+                    if cond_header:
+                        self._mine_tree(cond_header, min_count, new_prefix, patterns)
+
+    @staticmethod
+    def _count_support(node):
+        count = 0
+        while node is not None:
+            count += node.count
+            node = node.next
+        return count
+
+    def _generate_rules(self, itemset_support):
+        from itertools import combinations
+        rules = []
+
+        for itemset, support in itemset_support.items():
+            if len(itemset) < 2:
+                continue
+            items = list(itemset)
+            for i in range(1, len(items)):
+                for ant_tuple in combinations(items, i):
+                    antecedent = frozenset(ant_tuple)
+                    consequent = itemset - antecedent
+
+                    ant_support = itemset_support.get(antecedent)
+                    con_support = itemset_support.get(consequent)
+
+                    if not ant_support or ant_support == 0:
+                        continue
+
+                    confidence = support / ant_support
+                    if confidence < self.min_confidence:
+                        continue
+
+                    lift = confidence / con_support if con_support and con_support > 0 else 0
+
+                    rules.append({
+                        'antecedents': sorted(list(antecedent)),
+                        'consequents': sorted(list(consequent)),
+                        'confidence': round(confidence, 6),
+                        'support': round(support, 6),
+                        'lift': round(lift, 4),
+                    })
+
+        return rules
+
+    def close(self):
+        pass
+
+
+class _FPNode:
+    """Node in an FP-Tree."""
+    __slots__ = ['item', 'count', 'parent', 'children', 'next']
+
+    def __init__(self, item, parent):
+        self.item = item
+        self.count = 0
+        self.parent = parent
+        self.children = {}
+        self.next = None  # Link to next node with same item

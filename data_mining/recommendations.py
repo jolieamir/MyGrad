@@ -1,179 +1,149 @@
 """
 Recommendation Engine Module
-Generates product recommendations from mining results.
+Generates product recommendations from mining results (Apriori or FP-Growth).
+
+Both algorithms produce the same output format:
+  {
+    'frequent_itemsets': [{'items': [...], 'freq': N, 'support': F}, ...],
+    'association_rules': [{'antecedents': [...], 'consequents': [...],
+                           'confidence': F, 'support': F, 'lift': F}, ...]
+  }
 """
 
 from collections import defaultdict
 import json
 
+
 class RecommendationEngine:
     def __init__(self):
-        """Initialize recommendation engine."""
-        self.recommendations = {}
         self.frequent_itemsets = []
         self.association_rules = []
-    
+        # product_name -> list of recommendation dicts
+        self._recommendations = {}
+
     def load_mining_results(self, frequent_itemsets, association_rules=None):
-        """Load mining results from FP-Growth or Apriori."""
-        self.frequent_itemsets = frequent_itemsets
+        """Load results from either algorithm and build recommendations."""
+        self.frequent_itemsets = frequent_itemsets or []
         self.association_rules = association_rules or []
-        self._generate_recommendations()
-    
-    def _generate_recommendations(self):
-        """Generate recommendations from frequent itemsets."""
-        self.recommendations = {}
-        
-        # Build recommendations from frequent itemsets
+        self._build_recommendations()
+
+    # ------------------------------------------------------------------
+    # Internal: build recommendation lookup from rules + itemsets
+    # ------------------------------------------------------------------
+    def _build_recommendations(self):
+        recs = defaultdict(list)
+
+        # Primary source: association rules (have confidence + lift)
+        for rule in self.association_rules:
+            for ant in rule['antecedents']:
+                for con in rule['consequents']:
+                    recs[ant].append({
+                        'product': con,
+                        'confidence': rule.get('confidence', 0),
+                        'support': rule.get('support', 0),
+                        'lift': rule.get('lift', 0),
+                        'source': 'rule',
+                    })
+
+        # Secondary source: frequent itemsets (co-occurrence)
         for itemset_info in self.frequent_itemsets:
             items = itemset_info.get('items', [])
             support = itemset_info.get('support', 0)
-            freq = itemset_info.get('freq', 0)
-            
             if len(items) < 2:
                 continue
-            
-            # For each item, recommend other items in the same itemset
             for item in items:
-                if item not in self.recommendations:
-                    self.recommendations[item] = []
-                
-                other_items = [i for i in items if i != item]
-                for other_item in other_items:
-                    # Check if recommendation already exists
-                    exists = False
-                    for rec in self.recommendations[item]:
-                        if rec['product'] == other_item:
-                            # Update if higher support
-                            if support > rec.get('support', 0):
-                                rec['support'] = support
-                                rec['freq'] = freq
-                                rec['items_together'] = items
-                            exists = True
-                            break
-                    
-                    if not exists:
-                        self.recommendations[item].append({
-                            'product': other_item,
+                for other in items:
+                    if other == item:
+                        continue
+                    # Only add if not already covered by a rule
+                    existing = {r['product'] for r in recs[item]}
+                    if other not in existing:
+                        recs[item].append({
+                            'product': other,
+                            'confidence': 0,
                             'support': support,
-                            'freq': freq,
-                            'items_together': items
+                            'lift': 0,
+                            'source': 'itemset',
                         })
-        
-        # Sort recommendations by support
-        for item in self.recommendations:
-            self.recommendations[item].sort(key=lambda x: x['support'], reverse=True)
-    
-    def get_recommendations_for_product(self, product_name, top_n=5):
-        """Get top N recommendations for a specific product."""
-        if product_name in self.recommendations:
-            return self.recommendations[product_name][:top_n]
-        return []
-    
-    def get_frequently_bought_together(self, product_name, top_n=3):
-        """Get 'frequently bought together' recommendations."""
-        return self.get_recommendations_for_product(product_name, top_n)
-    
-    def get_similar_products(self, product_name, top_n=5):
-        """Get similar products based on co-occurrence."""
-        recommendations = self.get_recommendations_for_product(product_name, top_n)
-        return [rec['product'] for rec in recommendations]
-    
-    def get_association_rules_for_product(self, product_name, top_n=5):
-        """Get association rules involving a specific product."""
-        rules = []
-        for rule in self.association_rules:
-            antecedents = rule.get('antecedents', [])
-            consequents = rule.get('consequents', [])
-            
-            if product_name in antecedents or product_name in consequents:
-                rules.append(rule)
-        
-        # Sort by lift
-        rules.sort(key=lambda x: x.get('lift', 0), reverse=True)
-        return rules[:top_n]
-    
-    def get_bundle_suggestions(self, min_items=2, max_items=5, top_n=10):
-        """Get product bundle suggestions for promotions."""
+
+        # Sort each product's recommendations: rules first (by lift), then itemsets (by support)
+        for product in recs:
+            recs[product].sort(
+                key=lambda r: (r['lift'], r['confidence'], r['support']),
+                reverse=True,
+            )
+
+        self._recommendations = dict(recs)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    @property
+    def recommendations(self):
+        """Dict mapping product_name -> list of recommendation dicts."""
+        return self._recommendations
+
+    def get_recommendations(self, product_name, top_n=5):
+        """Get top-N recommendations for a single product."""
+        return self._recommendations.get(product_name, [])[:top_n]
+
+    def get_frequently_bought_together(self, product_name, top_n=4):
+        """Get 'frequently bought together' items."""
+        return self.get_recommendations(product_name, top_n)
+
+    def get_cross_sell(self, cart_items, top_n=5):
+        """Given a list of products in the cart, recommend items not already in cart."""
+        cart_set = set(cart_items)
+        scores = defaultdict(float)
+
+        for item in cart_items:
+            for rec in self._recommendations.get(item, []):
+                product = rec['product']
+                if product not in cart_set:
+                    # Weight by lift (if available) else support
+                    scores[product] += rec.get('lift', 0) or rec.get('support', 0)
+
+        sorted_recs = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        return [{'product': p, 'score': round(s, 4)} for p, s in sorted_recs[:top_n]]
+
+    def get_bundles(self, min_items=2, max_items=5, top_n=10):
+        """Get product bundle suggestions from frequent itemsets."""
         bundles = []
-        
-        for itemset_info in self.frequent_itemsets:
-            items = itemset_info.get('items', [])
-            support = itemset_info.get('support', 0)
-            freq = itemset_info.get('freq', 0)
-            
+        for info in self.frequent_itemsets:
+            items = info.get('items', [])
             if min_items <= len(items) <= max_items:
                 bundles.append({
                     'items': items,
-                    'support': support,
-                    'freq': freq
+                    'support': info.get('support', 0),
+                    'freq': info.get('freq', 0),
                 })
-        
-        # Sort by support
         bundles.sort(key=lambda x: x['support'], reverse=True)
         return bundles[:top_n]
-    
-    def get_cross_sell_recommendations(self, cart_items, top_n=5):
-        """Get cross-sell recommendations based on cart items."""
-        recommendations = defaultdict(float)
-        
-        for item in cart_items:
-            item_recs = self.get_recommendations_for_product(item, top_n=10)
-            for rec in item_recs:
-                rec_product = rec['product']
-                if rec_product not in cart_items:
-                    recommendations[rec_product] += rec['support']
-        
-        # Sort by aggregated support
-        sorted_recs = sorted(recommendations.items(), key=lambda x: x[1], reverse=True)
-        
-        return [
-            {'product': product, 'score': score}
-            for product, score in sorted_recs[:top_n]
-        ]
-    
-    def get_checkout_impulse_items(self, top_n=5):
-        """Get impulse buy items for checkout display."""
-        # Get items that frequently appear with small basket sizes
-        impulse_candidates = []
-        
-        for itemset_info in self.frequent_itemsets:
-            items = itemset_info.get('items', [])
-            support = itemset_info.get('support', 0)
-            
-            # Items in small baskets (2-3 items) are good impulse candidates
-            if 2 <= len(items) <= 3:
-                for item in items:
-                    impulse_candidates.append({
-                        'product': item,
-                        'support': support
-                    })
-        
-        # Aggregate and sort
-        product_scores = defaultdict(float)
-        for candidate in impulse_candidates:
-            product_scores[candidate['product']] += candidate['support']
-        
-        sorted_products = sorted(product_scores.items(), key=lambda x: x[1], reverse=True)
-        return [
-            {'product': product, 'score': score}
-            for product, score in sorted_products[:top_n]
-        ]
-    
+
+    def get_rules_for_product(self, product_name, top_n=5):
+        """Get association rules involving a specific product."""
+        rules = []
+        for rule in self.association_rules:
+            if product_name in rule['antecedents'] or product_name in rule['consequents']:
+                rules.append(rule)
+        rules.sort(key=lambda x: x.get('lift', 0), reverse=True)
+        return rules[:top_n]
+
+    # ------------------------------------------------------------------
+    # Serialization
+    # ------------------------------------------------------------------
     def to_dict(self):
-        """Convert recommendations to dictionary format."""
         return {
-            'recommendations': self.recommendations,
+            'recommendations': self._recommendations,
             'frequent_itemsets': self.frequent_itemsets,
-            'association_rules': self.association_rules
+            'association_rules': self.association_rules,
         }
-    
+
     def to_json(self):
-        """Convert recommendations to JSON string."""
         return json.dumps(self.to_dict(), indent=2)
-    
+
     def load_from_json(self, json_str):
-        """Load recommendations from JSON string."""
         data = json.loads(json_str)
-        self.recommendations = data.get('recommendations', {})
         self.frequent_itemsets = data.get('frequent_itemsets', [])
         self.association_rules = data.get('association_rules', [])
+        self._recommendations = data.get('recommendations', {})

@@ -6,7 +6,7 @@
 <div class="row">
     <div class="col-12">
         <h2><i class="fas fa-chart-bar"></i> Mining Results</h2>
-        
+
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
                 {% for category, message in messages %}
@@ -14,50 +14,291 @@
                 {% endfor %}
             {% endif %}
         {% endwith %}
-        
+
         {% if result %}
-        <!-- Single result view -->
-        <div class="card">
+        {# ================= Single result view ================= #}
+        {% set params = result.parameters | tojson | safe %}
+        {% set data   = result.results   | tojson | safe %}
+
+        <!-- Header card -->
+        <div class="card mb-4">
             <div class="card-body">
-                <h5 class="card-title">Results for {{ result.algorithm|upper }}</h5>
-                <p><strong>Created:</strong> {{ result.created_at }}</p>
-                <p><strong>Parameters:</strong> {{ result.parameters }}</p>
-                
-                <div class="mb-3">
-                    <a href="{{ url_for('manager_app.export_results', result_id=result.id, format='json') }}" class="btn btn-outline-primary">
-                        <i class="fas fa-download"></i> Export JSON
-                    </a>
-                    <a href="{{ url_for('manager_app.export_results', result_id=result.id, format='csv') }}" class="btn btn-outline-primary">
-                        <i class="fas fa-download"></i> Export CSV
-                    </a>
+                <div class="row align-items-center">
+                    <div class="col-md-8">
+                        <h4 class="mb-1">
+                            <span class="badge bg-primary">{{ result.algorithm|upper }}</span>
+                            <small class="text-muted ms-2">Run #{{ result.id }}</small>
+                        </h4>
+                        <p class="text-muted mb-0">
+                            {{ result.created_at.strftime('%Y-%m-%d %H:%M:%S') }}
+                            &mdash; by <strong>{{ result.created_by }}</strong>
+                        </p>
+                    </div>
+                    <div class="col-md-4 text-end">
+                        <a href="{{ url_for('manager_app.export_results', result_id=result.id, format='json') }}"
+                           class="btn btn-outline-primary btn-sm"><i class="fas fa-download"></i> JSON</a>
+                        <a href="{{ url_for('manager_app.export_results', result_id=result.id, format='csv') }}"
+                           class="btn btn-outline-primary btn-sm"><i class="fas fa-download"></i> CSV</a>
+                        <a href="{{ url_for('manager_app.results') }}"
+                           class="btn btn-outline-secondary btn-sm"><i class="fas fa-list"></i> All Runs</a>
+                    </div>
                 </div>
-                
-                <h6>Frequent Itemsets:</h6>
-                <div id="results-container">Loading...</div>
             </div>
         </div>
+
+        <!-- Stats cards (filled by JS) -->
+        <div class="row mb-4" id="statsRow">
+            <div class="col-md-3">
+                <div class="card text-center border-primary">
+                    <div class="card-body py-3">
+                        <h3 class="mb-0" id="statTxns">-</h3>
+                        <small class="text-muted">Transactions</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card text-center border-success">
+                    <div class="card-body py-3">
+                        <h3 class="mb-0" id="statItemsets">-</h3>
+                        <small class="text-muted">Frequent Itemsets</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card text-center border-warning">
+                    <div class="card-body py-3">
+                        <h3 class="mb-0" id="statRules">-</h3>
+                        <small class="text-muted">Association Rules</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card text-center border-info">
+                    <div class="card-body py-3">
+                        <h3 class="mb-0" id="statSupport">-</h3>
+                        <small class="text-muted">Min Support</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tabs: Rules | Itemsets -->
+        <ul class="nav nav-tabs mb-3" role="tablist">
+            <li class="nav-item">
+                <a class="nav-link active" data-bs-toggle="tab" href="#rulesTab">
+                    <i class="fas fa-arrow-right"></i> Association Rules
+                    <span class="badge bg-warning text-dark ms-1" id="rulesBadge">0</span>
+                </a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link" data-bs-toggle="tab" href="#itemsetsTab">
+                    <i class="fas fa-layer-group"></i> Frequent Itemsets
+                    <span class="badge bg-success ms-1" id="itemsetsBadge">0</span>
+                </a>
+            </li>
+        </ul>
+
+        <div class="tab-content">
+            <!-- Association Rules Tab -->
+            <div class="tab-pane fade show active" id="rulesTab">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <span><strong>Association Rules</strong> <small class="text-muted">(sorted by lift)</small></span>
+                        <input type="text" class="form-control form-control-sm" style="width:250px;"
+                               id="rulesSearch" placeholder="Search rules..." oninput="filterRules()">
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-hover table-striped mb-0" id="rulesTable">
+                                <thead class="table-dark">
+                                    <tr>
+                                        <th>#</th>
+                                        <th>If you buy (Antecedent)</th>
+                                        <th></th>
+                                        <th>You also buy (Consequent)</th>
+                                        <th>Confidence</th>
+                                        <th>Support</th>
+                                        <th>Lift</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="rulesBody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="card-footer text-center" id="rulesFooter"></div>
+                </div>
+            </div>
+
+            <!-- Frequent Itemsets Tab -->
+            <div class="tab-pane fade" id="itemsetsTab">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <span><strong>Frequent Itemsets</strong> <small class="text-muted">(sorted by support)</small></span>
+                        <div>
+                            <select class="form-select form-select-sm d-inline-block" style="width:120px;"
+                                    id="itemsetSizeFilter" onchange="filterItemsets()">
+                                <option value="0">All sizes</option>
+                                <option value="1">1 item</option>
+                                <option value="2" selected>2+ items</option>
+                                <option value="3">3+ items</option>
+                            </select>
+                            <input type="text" class="form-control form-control-sm d-inline-block ms-1" style="width:200px;"
+                                   id="itemsetsSearch" placeholder="Search..." oninput="filterItemsets()">
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-hover table-striped mb-0" id="itemsetsTable">
+                                <thead class="table-dark">
+                                    <tr>
+                                        <th>#</th>
+                                        <th>Items</th>
+                                        <th>Size</th>
+                                        <th>Frequency</th>
+                                        <th>Support</th>
+                                        <th>Support %</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="itemsetsBody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="card-footer text-center" id="itemsetsFooter"></div>
+                </div>
+            </div>
+        </div>
+
+        <script>
+        (function() {
+            var params  = JSON.parse({{ params }});
+            var rawData = JSON.parse({{ data }});
+
+            var itemsets = rawData.frequent_itemsets || [];
+            var rules    = rawData.association_rules || [];
+
+            // Stats
+            document.getElementById('statTxns').textContent     = (params.transaction_count || '-').toLocaleString();
+            document.getElementById('statItemsets').textContent  = itemsets.length.toLocaleString();
+            document.getElementById('statRules').textContent     = rules.length.toLocaleString();
+            document.getElementById('statSupport').textContent   = params.min_support;
+            document.getElementById('rulesBadge').textContent    = rules.length;
+            document.getElementById('itemsetsBadge').textContent = itemsets.length;
+
+            // ---- Render rules ----
+            window._allRules = rules;
+            window._allItemsets = itemsets;
+            renderRules(rules);
+            filterItemsets();
+
+            function renderRules(list) {
+                var body = document.getElementById('rulesBody');
+                var html = '';
+                var show = list.slice(0, 200);
+                for (var i = 0; i < show.length; i++) {
+                    var r = show[i];
+                    var conf = (r.confidence * 100).toFixed(1);
+                    var sup  = (r.support * 100).toFixed(2);
+                    var lift = r.lift.toFixed(2);
+                    var liftClass = r.lift > 3 ? 'text-success fw-bold' : r.lift > 1.5 ? 'text-primary' : '';
+
+                    html += '<tr>'
+                        + '<td class="text-muted">' + (i+1) + '</td>'
+                        + '<td><span class="badge bg-light text-dark border">' + r.antecedents.join('</span> <span class="badge bg-light text-dark border">') + '</span></td>'
+                        + '<td><i class="fas fa-long-arrow-alt-right text-primary"></i></td>'
+                        + '<td><span class="badge bg-light text-dark border">' + r.consequents.join('</span> <span class="badge bg-light text-dark border">') + '</span></td>'
+                        + '<td>' + confBar(conf) + '</td>'
+                        + '<td>' + sup + '%</td>'
+                        + '<td class="' + liftClass + '">' + lift + '</td>'
+                        + '</tr>';
+                }
+                body.innerHTML = html || '<tr><td colspan="7" class="text-center text-muted">No rules found</td></tr>';
+                document.getElementById('rulesFooter').textContent =
+                    'Showing ' + show.length + ' of ' + list.length + ' rules';
+            }
+
+            function confBar(pct) {
+                var color = pct >= 80 ? 'success' : pct >= 50 ? 'primary' : 'warning';
+                return '<div class="d-flex align-items-center">'
+                    + '<div class="progress flex-grow-1" style="height:8px;width:80px;">'
+                    + '<div class="progress-bar bg-' + color + '" style="width:' + pct + '%"></div>'
+                    + '</div>'
+                    + '<small class="ms-2">' + pct + '%</small></div>';
+            }
+
+            window.filterRules = function() {
+                var q = document.getElementById('rulesSearch').value.toLowerCase();
+                if (!q) { renderRules(window._allRules); return; }
+                var filtered = window._allRules.filter(function(r) {
+                    return r.antecedents.join(' ').toLowerCase().indexOf(q) >= 0
+                        || r.consequents.join(' ').toLowerCase().indexOf(q) >= 0;
+                });
+                renderRules(filtered);
+            };
+
+            // ---- Render itemsets ----
+            window.filterItemsets = function() {
+                var minSize = parseInt(document.getElementById('itemsetSizeFilter').value) || 0;
+                var q = document.getElementById('itemsetsSearch').value.toLowerCase();
+                var filtered = window._allItemsets.filter(function(is) {
+                    if (is.items.length < minSize) return false;
+                    if (q && is.items.join(' ').toLowerCase().indexOf(q) < 0) return false;
+                    return true;
+                });
+                renderItemsets(filtered);
+            };
+
+            function renderItemsets(list) {
+                var body = document.getElementById('itemsetsBody');
+                var html = '';
+                var show = list.slice(0, 300);
+                for (var i = 0; i < show.length; i++) {
+                    var is = show[i];
+                    var supPct = (is.support * 100).toFixed(2);
+                    html += '<tr>'
+                        + '<td class="text-muted">' + (i+1) + '</td>'
+                        + '<td>' + is.items.map(function(x){ return '<span class="badge bg-info text-dark me-1">' + x + '</span>'; }).join('') + '</td>'
+                        + '<td><span class="badge bg-secondary">' + is.items.length + '</span></td>'
+                        + '<td>' + is.freq.toLocaleString() + '</td>'
+                        + '<td>' + is.support.toFixed(4) + '</td>'
+                        + '<td>' + supPct + '%</td>'
+                        + '</tr>';
+                }
+                body.innerHTML = html || '<tr><td colspan="6" class="text-center text-muted">No itemsets match filters</td></tr>';
+                document.getElementById('itemsetsFooter').textContent =
+                    'Showing ' + show.length + ' of ' + list.length + ' itemsets';
+            }
+        })();
+        </script>
+
         {% else %}
-        <!-- List of all results -->
+        {# ================= List of all results ================= #}
         <div class="card">
             <div class="card-body">
                 {% if results %}
-                <table class="table table-striped">
-                    <thead>
+                <table class="table table-striped table-hover">
+                    <thead class="table-dark">
                         <tr>
+                            <th>#</th>
                             <th>Algorithm</th>
-                            <th>Created At</th>
-                            <th>Created By</th>
+                            <th>Date</th>
+                            <th>By</th>
+                            <th>Parameters</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>
-                        {% for result in results %}
+                        {% for r in results %}
                         <tr>
-                            <td>{{ result.algorithm|upper }}</td>
-                            <td>{{ result.created_at }}</td>
-                            <td>{{ result.created_by }}</td>
+                            <td>{{ r.id }}</td>
+                            <td><span class="badge bg-primary">{{ r.algorithm|upper }}</span></td>
+                            <td>{{ r.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                            <td>{{ r.created_by }}</td>
+                            <td><code>{{ r.parameters }}</code></td>
                             <td>
-                                <a href="{{ url_for('manager_app.results', result_id=result.id) }}" class="btn btn-sm btn-primary">View</a>
+                                <a href="{{ url_for('manager_app.results', result_id=r.id) }}"
+                                   class="btn btn-sm btn-primary"><i class="fas fa-eye"></i> View</a>
+                                <a href="{{ url_for('manager_app.export_results', result_id=r.id, format='json') }}"
+                                   class="btn btn-sm btn-outline-secondary"><i class="fas fa-download"></i></a>
                             </td>
                         </tr>
                         {% endfor %}
@@ -65,7 +306,8 @@
                 </table>
                 {% else %}
                 <div class="alert alert-info">
-                    <i class="fas fa-info-circle"></i> No mining results yet. Run a mining algorithm first!
+                    <i class="fas fa-info-circle"></i> No mining results yet.
+                    <a href="{{ url_for('manager_app.mining') }}">Run your first mining job!</a>
                 </div>
                 {% endif %}
             </div>

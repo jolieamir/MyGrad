@@ -1,132 +1,79 @@
 """
 Price Service Module
-Handles fetching product prices from SQL Server Cleaned_data table.
+Fetches product prices from SQL Server Cleaned_data table.
 """
 
 import pyodbc
 from config import Config
 
+
 class PriceService:
-    def __init__(self, sql_server_config=None):
-        """Initialize price service with SQL Server configuration."""
-        self.sql_server_config = sql_server_config or Config.SQL_SERVER_CONFIG
+    def __init__(self):
         self.conn = None
         self.connected = False
-    
-    def connect_to_sql_server(self):
-        """Establish connection to SQL Server using SQL Server Authentication."""
+
+    def _connect(self):
+        """Establish connection using the centralized config."""
         try:
-            # Use SQL Server Authentication
-            conn_str = (
-                    "DRIVER={ODBC Driver 17 for SQL Server};"
-                    "SERVER=localhost;"
-                    "DATABASE=TestDB;"
-                    "Trusted_Connection=yes;"
-                )
-            
-            
+            conn_str = Config.get_sql_server_connection_string()
             self.conn = pyodbc.connect(conn_str)
             self.connected = True
             return True
-
         except Exception as e:
-            print(f"SQL Server connection failed: {e}")
+            print(f"PriceService: SQL Server connection failed: {e}")
             self.connected = False
             return False
-    
-    def get_product_price(self, product_name):
-        """Get the average UnitPrice for a product from Cleaned_data table."""
+
+    def _ensure_connected(self):
         if not self.connected:
-            if not self.connect_to_sql_server():
-                return None
-        
-        try:
-            cursor = self.conn.cursor()
-            
-            # Get average UnitPrice for the product
-            cursor.execute("""
-                SELECT AVG(CAST(UnitPrice AS FLOAT)) as avg_price
-                FROM Cleaned_data 
-                WHERE Description = ? AND UnitPrice > 0
-            """, (product_name,))
-            
-            result = cursor.fetchone()
-            if result and result[0]:
-                return float(result[0])
-            else:
-                return None
-                
-        except Exception as e:
-            print(f"Error fetching price for {product_name}: {e}")
-            return None
-    
-    def get_product_prices_batch(self, product_names):
-        """Get prices for multiple products in a single query."""
-        if not self.connected:
-            if not self.connect_to_sql_server():
-                return {}
-        
-        if not product_names:
-            return {}
-        
-        try:
-            cursor = self.conn.cursor()
-            
-            # Create parameter placeholders for IN clause
-            placeholders = ','.join(['?' for _ in product_names])
-            
-            # Get average UnitPrice for all products
-            cursor.execute(f"""
-                SELECT Description, AVG(CAST(UnitPrice AS FLOAT)) as avg_price
-                FROM Cleaned_data 
-                WHERE Description IN ({placeholders}) AND UnitPrice > 0
-                GROUP BY Description
-            """, product_names)
-            
-            results = cursor.fetchall()
-            prices = {}
-            for row in results:
-                prices[row[0]] = float(row[1])
-            
-            return prices
-                
-        except Exception as e:
-            print(f"Error fetching batch prices: {e}")
-            return {}
-    
-    def get_all_product_prices(self):
-        """Get prices for all products in Cleaned_data table."""
-        if not self.connected:
-            if not self.connect_to_sql_server():
-                return {}
-        
-        try:
-            cursor = self.conn.cursor()
-            
-            # Get average UnitPrice for all products
-            cursor.execute("""
-                SELECT Description, AVG(CAST(UnitPrice AS FLOAT)) as avg_price
-                FROM Cleaned_data 
-                WHERE UnitPrice > 0
-                GROUP BY Description
-            """)
-            
-            results = cursor.fetchall()
-            prices = {}
-            for row in results:
-                prices[row[0]] = float(row[1])
-            
-            return prices
-                
-        except Exception as e:
-            print(f"Error fetching all prices: {e}")
-            return {}
-    
+            return self._connect()
+        return True
+
     def is_connected(self):
-        """Check if connected to SQL Server."""
         return self.connected
-    
-    def __del__(self):
-        """Clean up connection."""
+
+    def get_product_price(self, product_name):
+        """Get the average UnitPrice for a product from Cleaned_data."""
+        if not self._ensure_connected():
+            return None
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT AVG(CAST(UnitPrice AS FLOAT)) FROM Cleaned_data "
+                "WHERE Description = ? AND UnitPrice > 0",
+                (product_name,),
+            )
+            row = cursor.fetchone()
+            return round(float(row[0]), 2) if row and row[0] else None
+        except Exception as e:
+            print(f"PriceService: Error fetching price for '{product_name}': {e}")
+            return None
+
+    def get_all_product_prices(self):
+        """Get average prices for all products in Cleaned_data.
+
+        Returns:
+            dict mapping Description -> avg_price
+        """
+        if not self._ensure_connected():
+            return {}
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT Description, AVG(CAST(UnitPrice AS FLOAT)) AS avg_price "
+                "FROM Cleaned_data WHERE UnitPrice > 0 "
+                "GROUP BY Description"
+            )
+            return {row[0]: round(float(row[1]), 2) for row in cursor.fetchall()}
+        except Exception as e:
+            print(f"PriceService: Error fetching all prices: {e}")
+            return {}
+
+    def close(self):
         if self.conn:
             self.conn.close()
+            self.conn = None
+            self.connected = False
+
+    def __del__(self):
+        self.close()

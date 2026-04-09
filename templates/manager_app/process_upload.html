@@ -6,26 +6,31 @@
 <div class="row justify-content-center">
     <div class="col-lg-8">
         <h2><i class="fas fa-cog"></i> Process Uploaded File</h2>
-        
+
         <div class="card">
             <div class="card-body">
-                <p><strong>File to process:</strong> {{ filepath }}</p>
-                
+                <p><strong>File:</strong> {{ filepath }}</p>
+
                 <form method="POST">
-                    <div class="alert alert-warning">
-                        <i class="fas fa-exclamation-triangle"></i>
-                        <strong>Important:</strong> This will replace all existing products with products from your CSV file. 
-                        The system will extract unique products from your transaction data and create a new product catalog.
-                    </div>
-                    
                     <div class="alert alert-info">
                         <i class="fas fa-info-circle"></i>
-                        <strong>Processing:</strong> Large files (like your ~44MB CSV) may take 1-2 minutes to process. 
-                        Please wait and do not refresh the page during processing.
+                        <strong>Pipeline steps:</strong>
+                        <ol class="mb-0 mt-2">
+                            <li>TRUNCATE Row_data &amp; Cleaned_data in SQL Server</li>
+                            <li>Insert raw CSV rows into Row_data</li>
+                            <li>Copy into Cleaned_data</li>
+                            <li>Apply cleaning rules (remove cancellations, nulls, invalid prices, etc.)</li>
+                            <li>Sync unique products into the web catalog</li>
+                        </ol>
                     </div>
-                    
+
+                    <div class="alert alert-warning">
+                        <i class="fas fa-exclamation-triangle"></i>
+                        Large files (~44 MB) may take a minute. Do not refresh the page.
+                    </div>
+
                     <button type="submit" class="btn btn-primary">
-                        <i class="fas fa-play"></i> Process Data
+                        <i class="fas fa-play"></i> Run Pipeline
                     </button>
                     <a href="{{ url_for('manager_app.upload') }}" class="btn btn-secondary">Cancel</a>
                 </form>

@@ -1,182 +1,266 @@
 """
 Apriori Algorithm Module
-Distributed Apriori implementation using PySpark (SON Algorithm).
-Refactored from your existing apriori_algorithm() and son_apriori() functions.
+
+Primary: PySpark distributed SON (Savasere-Omiecinski-Navathe) algorithm
+Fallback: Pure-Python Apriori implementation (single-machine)
 """
 
 import math
-from collections import defaultdict
 from itertools import combinations
-from pyspark.sql import SparkSession
+from collections import defaultdict
+
 
 class AprioriMiner:
     def __init__(self, min_support=0.01, min_confidence=0.5):
-        """Initialize Apriori miner with parameters."""
         self.min_support = min_support
         self.min_confidence = min_confidence
-        self.spark = None
-    
-    def _get_spark_session(self):
-        """Get or create Spark session."""
-        if self.spark is None:
-            self.spark = SparkSession.builder \
-                .appName("AprioriMining") \
-                .master("local[*]") \
-                .config("spark.driver.memory", "2g") \
-                .getOrCreate()
-        return self.spark
-    
-    
-    def _apriori_partition(self, partition, support_threshold, total_count):
-        """Local Apriori for a single partition (used in SON algorithm)."""
+
+    def run_distributed(self, transactions):
+        """Run Apriori. Uses PySpark SON if available, else pure Python.
+
+        Returns:
+            dict with keys 'frequent_itemsets' and 'association_rules'
+        """
+        # Try PySpark first
+        try:
+            from data_mining.spark_session import get_spark
+            spark = get_spark()
+            if spark is not None:
+                return self._run_pyspark_son(spark, transactions)
+        except Exception as e:
+            print(f"[Apriori] PySpark failed, using pure Python: {e}")
+
+        # Fallback: pure Python
+        return self._run_pure_python(transactions)
+
+    # ------------------------------------------------------------------
+    # PySpark SON implementation
+    # ------------------------------------------------------------------
+    def _run_pyspark_son(self, spark, transactions):
+        sc = spark.sparkContext
+        rdd = sc.parallelize(transactions, numSlices=max(4, sc.defaultParallelism))
+        total_count = rdd.count()
+
+        if total_count == 0:
+            return {'frequent_itemsets': [], 'association_rules': []}
+
+        min_sup = self.min_support
+
+        # Phase 1: local frequent itemsets
+        candidates_rdd = rdd.mapPartitions(
+            lambda part: AprioriMiner._apriori_partition(part, min_sup, total_count)
+        )
+        candidates = candidates_rdd.distinct().collect()
+
+        if not candidates:
+            return {'frequent_itemsets': [], 'association_rules': []}
+
+        bc_candidates = sc.broadcast(candidates)
+
+        # Phase 2: global counting
+        global_counts = (
+            rdd
+            .flatMap(lambda txn: [
+                (c, 1) for c in bc_candidates.value if c <= set(txn)
+            ])
+            .reduceByKey(lambda a, b: a + b)
+            .filter(lambda x: x[1] / total_count >= min_sup)
+            .collect()
+        )
+        bc_candidates.unpersist()
+
+        itemset_support = {}
+        frequent_itemsets = []
+        for itemset, count in global_counts:
+            support = count / total_count
+            itemset_support[itemset] = support
+            frequent_itemsets.append({
+                'items': sorted(list(itemset)),
+                'freq': count,
+                'support': round(support, 6),
+            })
+        frequent_itemsets.sort(key=lambda x: x['support'], reverse=True)
+
+        association_rules = self._generate_rules(itemset_support)
+
+        return {'frequent_itemsets': frequent_itemsets, 'association_rules': association_rules}
+
+    @staticmethod
+    def _apriori_partition(partition, global_support, total_count):
+        """Local Apriori for a single partition (SON Phase 1)."""
         partition = list(partition)
-        partition_size = len(partition)
-        
-        # Adjusted local support
-        local_support = math.ceil(support_threshold * partition_size / total_count)
-        
-        # Count 1-itemsets
+        n = len(partition)
+        if n == 0:
+            return iter([])
+
+        local_support = math.ceil(global_support * n)
+
         item_counts = {}
         for txn in partition:
             for item in txn:
                 item_counts[item] = item_counts.get(item, 0) + 1
-        
-        freq_items = set(
-            [frozenset([item]) for item, count in item_counts.items() if count >= local_support]
-        )
-        
-        current_freq = freq_items
-        all_freq = set(freq_items)
+
+        current_freq = {
+            frozenset([item]) for item, count in item_counts.items()
+            if count >= local_support
+        }
+        all_freq = set(current_freq)
+
         k = 2
-        
         while current_freq:
             candidates = set()
             freq_list = list(current_freq)
-            
-            # Generate candidates
             for i in range(len(freq_list)):
                 for j in range(i + 1, len(freq_list)):
-                    union = freq_list[i].union(freq_list[j])
+                    union = freq_list[i] | freq_list[j]
                     if len(union) == k:
                         candidates.add(union)
-            
-            # Count candidates
+
             candidate_counts = {}
             for txn in partition:
                 txn_set = set(txn)
-                for candidate in candidates:
-                    if candidate.issubset(txn_set):
-                        candidate_counts[candidate] = candidate_counts.get(candidate, 0) + 1
-            
-            # Filter by local support
-            current_freq = set(
-                [c for c, count in candidate_counts.items() if count >= local_support]
-            )
-            
-            all_freq.update(current_freq)
+                for c in candidates:
+                    if c <= txn_set:
+                        candidate_counts[c] = candidate_counts.get(c, 0) + 1
+
+            current_freq = {c for c, cnt in candidate_counts.items() if cnt >= local_support}
+            all_freq |= current_freq
             k += 1
-        
+
         return iter(all_freq)
-    
-    def run_distributed_son(self, transactions):
-        """Run SON (Savasere-Omiecinski-Navathe) Apriori algorithm using PySpark."""
-        spark = self._get_spark_session()
-        sc = spark.sparkContext
-        
-        # Parallelize transactions
-        rdd = sc.parallelize(transactions)
-        total_count = rdd.count()
-        
-        if total_count == 0:
-            return []
-        
-        # Phase 1: Local frequent itemsets (candidates)
-        candidates_rdd = rdd.mapPartitions(
-            lambda part: self._apriori_partition(part, self.min_support, total_count)
-        )
-        candidates = candidates_rdd.distinct().collect()
-        
-        # Convert to frozensets
-        candidates = [frozenset(c) for c in candidates]
-        
-        # Broadcast candidates
-        bc_candidates = sc.broadcast(candidates)
-        
-        # Phase 2: Global counting
-        candidate_counts = rdd.flatMap(lambda txn: [
-            (candidate, 1)
-            for candidate in bc_candidates.value
-            if candidate.issubset(set(txn))
-        ]).reduceByKey(lambda a, b: a + b)
-        
-        # Filter by global support
-        frequent_itemsets = candidate_counts \
-            .filter(lambda x: x[1] / total_count >= self.min_support) \
-            .map(lambda x: x[0]) \
-            .collect()
-        
-        # Format results
-        results = []
-        for itemset in frequent_itemsets:
-            results.append({
-                'items': list(itemset),
-                'support': sum(1 for txn in transactions if itemset.issubset(set(txn))) / total_count
+
+    # ------------------------------------------------------------------
+    # Pure-Python Apriori
+    # ------------------------------------------------------------------
+    def _run_pure_python(self, transactions):
+        total = len(transactions)
+        if total == 0:
+            return {'frequent_itemsets': [], 'association_rules': []}
+
+        min_count = max(1, int(self.min_support * total))
+
+        # Filter transactions to only keep frequent items (massive speedup)
+        item_counts = defaultdict(int)
+        for txn in transactions:
+            for item in set(txn):
+                item_counts[item] += 1
+
+        freq_items = {item for item, cnt in item_counts.items() if cnt >= min_count}
+
+        # Build filtered transactions + inverted index (item -> set of txn indices)
+        txn_sets = []
+        inverted = defaultdict(set)  # item -> {txn_idx, ...}
+        for i, txn in enumerate(transactions):
+            filtered = frozenset(item for item in txn if item in freq_items)
+            txn_sets.append(filtered)
+            for item in filtered:
+                inverted[item].add(i)
+
+        # Frequent 1-itemsets
+        itemset_support = {}
+        frequent_itemsets = []
+        freq_1_map = {}  # frozenset -> count
+
+        for item in freq_items:
+            count = item_counts[item]
+            fs = frozenset([item])
+            freq_1_map[fs] = count
+            support = count / total
+            itemset_support[fs] = support
+            frequent_itemsets.append({
+                'items': [item],
+                'freq': count,
+                'support': round(support, 6),
             })
-        
-        return results
-    
-    def run_distributed(self, transactions):
-        """Run distributed Apriori using PySpark."""
-        return self.run_distributed_son(transactions)
-    
-    def generate_association_rules(self, frequent_itemsets, transactions, min_confidence=None):
-        """Generate association rules from frequent itemsets."""
-        if min_confidence is None:
-            min_confidence = self.min_confidence
-        
+
+        # Generate k-itemsets using inverted index for fast counting
+        current_freq = dict(freq_1_map)  # frozenset -> count
+        k = 2
+
+        while current_freq:
+            # Generate candidates
+            candidates = set()
+            freq_list = list(current_freq.keys())
+            for i in range(len(freq_list)):
+                for j in range(i + 1, len(freq_list)):
+                    union = freq_list[i] | freq_list[j]
+                    if len(union) == k:
+                        candidates.add(union)
+
+            if not candidates:
+                break
+
+            # Count using inverted index intersection (much faster than scanning all txns)
+            next_freq = {}
+            for candidate in candidates:
+                items = list(candidate)
+                # Intersect transaction sets for all items in the candidate
+                common_txns = inverted[items[0]]
+                for item in items[1:]:
+                    common_txns = common_txns & inverted[item]
+                    if len(common_txns) < min_count:
+                        break  # Early termination
+
+                count = len(common_txns)
+                if count >= min_count:
+                    support = count / total
+                    itemset_support[candidate] = support
+                    frequent_itemsets.append({
+                        'items': sorted(list(candidate)),
+                        'freq': count,
+                        'support': round(support, 6),
+                    })
+                    next_freq[candidate] = count
+
+            current_freq = next_freq
+            k += 1
+
+        frequent_itemsets.sort(key=lambda x: x['support'], reverse=True)
+
+        # Generate association rules
+        association_rules = self._generate_rules(itemset_support)
+
+        print(f"[Apriori] Found {len(frequent_itemsets)} frequent itemsets, "
+              f"{len(association_rules)} rules (pure Python)")
+
+        return {'frequent_itemsets': frequent_itemsets, 'association_rules': association_rules}
+
+    # ------------------------------------------------------------------
+    # Shared rule generation
+    # ------------------------------------------------------------------
+    def _generate_rules(self, itemset_support):
         rules = []
-        total_transactions = len(transactions)
-        transaction_sets = [set(txn) for txn in transactions]
-        
-        for itemset_info in frequent_itemsets:
-            itemset = set(itemset_info['items'])
-            itemset_count = itemset_info.get('support', 0) * total_transactions
-            
+        for itemset, support in itemset_support.items():
             if len(itemset) < 2:
                 continue
-            
-            # Generate all possible rules
-            for i in range(1, len(itemset)):
-                for antecedent in combinations(itemset, i):
-                    antecedent = set(antecedent)
+            items = list(itemset)
+            for i in range(1, len(items)):
+                for ant_tuple in combinations(items, i):
+                    antecedent = frozenset(ant_tuple)
                     consequent = itemset - antecedent
-                    
-                    # Calculate confidence
-                    antecedent_count = sum(1 for txn in transaction_sets if antecedent.issubset(txn))
-                    if antecedent_count == 0:
+
+                    ant_support = itemset_support.get(antecedent)
+                    con_support = itemset_support.get(consequent)
+
+                    if not ant_support or ant_support == 0:
                         continue
-                    
-                    confidence = itemset_count / antecedent_count
-                    
-                    if confidence >= min_confidence:
-                        # Calculate lift
-                        consequent_count = sum(1 for txn in transaction_sets if consequent.issubset(txn))
-                        lift = (confidence * total_transactions) / consequent_count if consequent_count > 0 else 0
-                        
-                        rules.append({
-                            'antecedents': list(antecedent),
-                            'consequents': list(consequent),
-                            'confidence': confidence,
-                            'support': itemset_count / total_transactions,
-                            'lift': lift
-                        })
-        
-        # Sort by lift descending
+
+                    confidence = support / ant_support
+                    if confidence < self.min_confidence:
+                        continue
+
+                    lift = confidence / con_support if con_support and con_support > 0 else 0
+
+                    rules.append({
+                        'antecedents': sorted(list(antecedent)),
+                        'consequents': sorted(list(consequent)),
+                        'confidence': round(confidence, 6),
+                        'support': round(support, 6),
+                        'lift': round(lift, 4),
+                    })
+
         rules.sort(key=lambda x: x['lift'], reverse=True)
-        
         return rules
-    
-    def __del__(self):
-        """Clean up Spark session."""
-        if self.spark:
-            self.spark.stop()
+
+    def close(self):
+        pass

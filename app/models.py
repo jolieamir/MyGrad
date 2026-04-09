@@ -36,7 +36,7 @@ class Product(db.Model):
     price = db.Column(db.Float, nullable=False)
     image_url = db.Column(db.String(500))
     description = db.Column(db.Text)
-    stock_code = db.Column(db.String(50), unique=True)
+    stock_code = db.Column(db.String(50))
     
     def __repr__(self):
         return f'<Product {self.name}>'
@@ -49,7 +49,8 @@ class Recommendation(db.Model):
     confidence = db.Column(db.Float)
     support = db.Column(db.Float)
     lift = db.Column(db.Float)
-    
+    algorithm = db.Column(db.String(50), default='fpgrowth')  # 'fpgrowth' or 'apriori'
+
     product = db.relationship('Product', foreign_keys=[product_id], backref='recommendations')
     recommended_with = db.relationship('Product', foreign_keys=[recommended_with_id])
 

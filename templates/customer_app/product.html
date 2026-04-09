@@ -4,63 +4,105 @@
 
 {% block content %}
 <div class="row">
-    <div class="col-md-6">
+    <!-- Product details -->
+    <div class="col-md-5">
         <div class="card">
             <div class="card-body">
                 <h1>{{ product.name }}</h1>
                 <p class="lead">{{ product.description }}</p>
-                
+
                 <h2 class="text-primary my-4">${{ "%.2f"|format(product_price) }}</h2>
-                
+
                 <form action="{{ url_for('customer_app.add_to_cart', product_id=product.id) }}" method="POST">
                     <button type="submit" class="btn btn-primary btn-lg w-100">
                         <i class="fas fa-cart-plus"></i> Add to Cart
                     </button>
                 </form>
+
+                {% if product.stock_code %}
+                <p class="text-muted mt-3 mb-0"><small>Stock Code: {{ product.stock_code }}</small></p>
+                {% endif %}
             </div>
         </div>
     </div>
-    
-    <div class="col-md-6">
-        {% if recommended_products %}
-        <div class="card mb-4">
-            <div class="card-body">
-                <h3><i class="fas fa-handshake"></i> Frequently Bought Together</h3>
-                <div class="list-group">
-                    {% for rec_item in recommended_products %}
-                    <a href="{{ url_for('customer_app.product_detail', product_id=rec_item.product.id) }}" 
-                       class="list-group-item list-group-item-action">
-                        <div class="d-flex w-100 justify-content-between">
-                            <h5 class="mb-1">{{ rec_item.product.name }}</h5>
-                            <small>${{ "%.2f"|format(rec_item.price) }}</small>
-                        </div>
-                    </a>
-                    {% endfor %}
+
+    <!-- Recommendations by algorithm -->
+    <div class="col-md-7">
+        {% if algo_sections %}
+            {% for section in algo_sections %}
+            {% set colors = {'FP-GROWTH': ('success', 'success'), 'APRIORI': ('primary', 'primary')} %}
+            {% set color = colors.get(section.name, ('secondary', 'secondary')) %}
+            <!-- Frequently Bought Together -->
+            <div class="card mb-2 border-{{ color[0] }}">
+                <div class="card-header bg-{{ color[0] }} text-white d-flex justify-content-between align-items-center">
+                    <div>
+                        <h5 class="mb-0"><i class="fas fa-chart-line"></i> Frequently Bought Together</h5>
+                        <small>Powered by {{ section.label }} association rules</small>
+                    </div>
+                    <span class="badge bg-light text-{{ color[1] }} fs-6">{{ section.name }}</span>
                 </div>
-            </div>
-        </div>
-        {% endif %}
-        
-        {% if similar_products %}
-        <div class="card">
-            <div class="card-body">
-                <h3><i class="fas fa-th"></i> Similar Products</h3>
-                <div class="row row-cols-2 g-2">
-                    {% for sim_item in similar_products %}
-                    <div class="col">
-                        <div class="card h-100">
-                            <div class="card-body p-2">
-                                <h6 class="card-title">{{ sim_item.product.name }}</h6>
-                                <p class="card-text text-muted small">${{ "%.2f"|format(sim_item.price) }}</p>
-                                <a href="{{ url_for('customer_app.product_detail', product_id=sim_item.product.id) }}" 
-                                   class="btn btn-sm btn-outline-primary">View</a>
+                <div class="card-body">
+                    <div class="row row-cols-2 g-2">
+                        {% for rec_item in section.recs %}
+                        <div class="col">
+                            <div class="card h-100 border-{{ color[0] }}">
+                                <div class="card-body p-3">
+                                    <h6 class="card-title mb-1">{{ rec_item.product.name }}</h6>
+                                    <p class="text-{{ color[0] }} fw-bold mb-1">${{ "%.2f"|format(rec_item.price) }}</p>
+                                    {% if rec_item.lift and rec_item.lift > 0 %}
+                                    <small class="text-muted">Lift: {{ "%.1f"|format(rec_item.lift) }} | Conf: {{ "%.0f"|format(rec_item.confidence * 100) }}%</small>
+                                    {% endif %}
+                                    <div class="d-flex gap-1 mt-2">
+                                        <a href="{{ url_for('customer_app.product_detail', product_id=rec_item.product.id) }}"
+                                           class="btn btn-sm btn-outline-{{ color[0] }}">View</a>
+                                        <form action="{{ url_for('customer_app.add_to_cart', product_id=rec_item.product.id) }}" method="POST" class="d-inline">
+                                            <button type="submit" class="btn btn-sm btn-{{ color[0] }}">
+                                                <i class="fas fa-cart-plus"></i>
+                                            </button>
+                                        </form>
+                                    </div>
+                                </div>
                             </div>
                         </div>
+                        {% endfor %}
                     </div>
-                    {% endfor %}
                 </div>
             </div>
-        </div>
+
+            <!-- You May Also Like (2nd degree from same algorithm) -->
+            {% if section.also_like %}
+            <div class="card mb-3 border-{{ color[0] }}">
+                <div class="card-header d-flex justify-content-between align-items-center border-{{ color[0] }}">
+                    <div>
+                        <h6 class="mb-0"><i class="fas fa-th"></i> You May Also Like</h6>
+                        <small class="text-muted">2nd-degree co-occurrence via {{ section.label }}</small>
+                    </div>
+                    <span class="badge bg-{{ color[0] }}">{{ section.name }}</span>
+                </div>
+                <div class="card-body py-2">
+                    <div class="row row-cols-2 g-2">
+                        {% for item in section.also_like %}
+                        <div class="col">
+                            <div class="card h-100">
+                                <div class="card-body p-2">
+                                    <h6 class="card-title mb-1 small">{{ item.product.name }}</h6>
+                                    <p class="text-muted mb-1 small">${{ "%.2f"|format(item.price) }}</p>
+                                    <a href="{{ url_for('customer_app.product_detail', product_id=item.product.id) }}"
+                                       class="btn btn-sm btn-outline-{{ color[0] }}">View</a>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+            {% endfor %}
+        {% else %}
+            <div class="alert alert-info">
+                <i class="fas fa-info-circle"></i> No recommendations available for this product yet.
+                Run mining from the <a href="{{ url_for('manager_app.mining') }}">Manager panel</a> to generate recommendations.
+            </div>
         {% endif %}
     </div>
 </div>

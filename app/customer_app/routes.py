@@ -1,308 +1,304 @@
 from flask import Blueprint, render_template, request, session, redirect, url_for, flash
 from app import db
-from app.models import Product, Order, OrderItem, Recommendation
+from app.models import Product, Order, OrderItem, Recommendation, MiningResult
 from datetime import datetime
 import uuid
 
 customer_bp = Blueprint('customer_app', __name__)
 
-# Cache for SQL Server prices to avoid repeated queries
+# Price cache (refreshes every 5 minutes)
 _price_cache = {}
-_price_cache_timestamp = None
-_sql_server_available = False
+_price_cache_time = None
+_sql_available = False
 
-# Helper function to get cart from session
+
+def _refresh_price_cache():
+    """Refresh the SQL Server price cache if stale (>5 min)."""
+    global _price_cache, _price_cache_time, _sql_available
+    from datetime import datetime as dt
+
+    now = dt.now()
+    if _price_cache_time and (now - _price_cache_time).total_seconds() < 300:
+        return  # Cache is fresh
+
+    try:
+        from data_mining.price_service import PriceService
+        svc = PriceService()
+        _price_cache = svc.get_all_product_prices()
+        _sql_available = svc.is_connected()
+        svc.close()
+        _price_cache_time = now
+    except Exception:
+        _sql_available = False
+
+
+def get_price(product):
+    """Get product price: SQL Server cache first, fallback to product.price."""
+    _refresh_price_cache()
+    return _price_cache.get(product.name, product.price)
+
+
 def get_cart():
     return session.get('cart', {})
 
-def get_product_price_from_sql(product):
-    """Get product price from SQL Server Cleaned_data table, with fallback to product.price."""
-    global _sql_server_available
-    
-    try:
-        from data_mining.price_service import PriceService
-        
-        # Use cached prices if available (cache for 5 minutes)
-        global _price_cache, _price_cache_timestamp
-        from datetime import datetime as dt
-        current_time = dt.now()
-        
-        if not _price_cache or not _price_cache_timestamp or (current_time - _price_cache_timestamp).total_seconds() > 300:
-            # Refresh cache
-            price_service = PriceService()
-            _price_cache = price_service.get_all_product_prices()
-            _price_cache_timestamp = current_time
-            _sql_server_available = price_service.is_connected()
-        
-        # Try to get price from SQL Server
-        product_name = product.name
-        if product_name in _price_cache:
-            return _price_cache[product_name]
-        
-        # Fallback to product's stored price
-        return product.price
-        
-    except Exception as e:
-        # Fallback to product's stored price if SQL Server fails
-        _sql_server_available = False
-        return product.price
-
-def get_sql_server_status():
-    """Get SQL Server connection status."""
-    return _sql_server_available
 
 def get_cart_total():
-    cart = get_cart()
     total = 0
-    for product_id, quantity in cart.items():
-        product = Product.query.get(product_id)
+    for pid, qty in get_cart().items():
+        product = Product.query.get(pid)
         if product:
-            price = get_product_price_from_sql(product)
-            total += price * quantity
+            total += get_price(product) * qty
     return total
 
-def get_cart_count():
-    cart = get_cart()
-    return sum(cart.values())
 
-# Make cart available to all templates
+def get_cart_count():
+    return sum(get_cart().values())
+
+
 @customer_bp.context_processor
 def inject_cart():
     return dict(cart_count=get_cart_count(), cart_total=get_cart_total)
 
+
+# ======================================================================
+# Pages
+# ======================================================================
+
 @customer_bp.route('/')
 @customer_bp.route('/index')
 def index():
-    """Home page - product catalog."""
     products = Product.query.all()
-    
-    # Get prices from SQL Server for all products
-    products_with_prices = []
-    for product in products:
-        price = get_product_price_from_sql(product)
-        products_with_prices.append({
-            'product': product,
-            'price': price
-        })
-    
-    return render_template('customer_app/index.html', 
-                         products_with_prices=products_with_prices,
-                         sql_server_available=get_sql_server_status())
+    products_with_prices = [
+        {'product': p, 'price': get_price(p)} for p in products
+    ]
+    return render_template('customer_app/index.html',
+                           products_with_prices=products_with_prices,
+                           sql_server_available=_sql_available)
+
 
 @customer_bp.route('/product/<int:product_id>')
 def product_detail(product_id):
-    """Product detail page with recommendations."""
     product = Product.query.get_or_404(product_id)
-    
-    # Get price from SQL Server
-    product_price = get_product_price_from_sql(product)
-    
-    # Get recommendations for this product
-    recommendations = Recommendation.query.filter_by(product_id=product_id).all()
-    recommended_products_with_prices = []
-    for rec in recommendations[:4]:
-        rec_price = get_product_price_from_sql(rec.recommended_with)
-        recommended_products_with_prices.append({
-            'product': rec.recommended_with,
-            'price': rec_price
-        })
-    
-    # Get similar products (no longer by category, just other products)
-    similar_products_with_prices = []
-    other_products = Product.query.filter(Product.id != product_id).limit(4).all()
-    for sim_product in other_products:
-        sim_price = get_product_price_from_sql(sim_product)
-        similar_products_with_prices.append({
-            'product': sim_product,
-            'price': sim_price
-        })
-    
+    product_price = get_price(product)
+
+    # Build recommendations per algorithm
+    def _get_deduped_recs(pid, algo, limit=4):
+        recs = Recommendation.query.filter_by(
+            product_id=pid, algorithm=algo
+        ).order_by(Recommendation.lift.desc()).all()
+        seen = set()
+        result = []
+        for r in recs:
+            if r.recommended_with_id not in seen and len(result) < limit:
+                seen.add(r.recommended_with_id)
+                result.append({
+                    'product': r.recommended_with,
+                    'price': get_price(r.recommended_with),
+                    'confidence': r.confidence,
+                    'lift': r.lift,
+                })
+        return result, seen
+
+    def _get_also_like(pid, algo, exclude_ids, limit=4):
+        """2nd-degree: recs of recs from the same algorithm."""
+        similar = []
+        used = set(exclude_ids)
+        for rec_pid in list(exclude_ids):
+            related = Recommendation.query.filter_by(
+                product_id=rec_pid, algorithm=algo
+            ).order_by(Recommendation.support.desc()).limit(6).all()
+            for r in related:
+                rid = r.recommended_with_id
+                if rid != pid and rid not in used and len(similar) < limit:
+                    used.add(rid)
+                    similar.append({
+                        'product': r.recommended_with,
+                        'price': get_price(r.recommended_with),
+                    })
+        return similar
+
+    # Get which algorithms have results
+    algo_sections = []
+    for algo in ['apriori', 'fpgrowth']:
+        recs, seen_ids = _get_deduped_recs(product_id, algo, limit=4)
+        if recs:
+            also_like = _get_also_like(product_id, algo, seen_ids, limit=4)
+            algo_sections.append({
+                'name': algo.upper(),
+                'label': 'FP-Growth' if algo == 'fpgrowth' else 'Apriori (SON)',
+                'recs': recs,
+                'also_like': also_like,
+            })
+
     return render_template('customer_app/product.html',
-                         product=product,
-                         product_price=product_price,
-                         recommended_products=recommended_products_with_prices,
-                         similar_products=similar_products_with_prices,
-                         sql_server_available=get_sql_server_status())
+                           product=product,
+                           product_price=product_price,
+                           algo_sections=algo_sections,
+                           sql_server_available=_sql_available)
+
 
 @customer_bp.route('/cart')
 def cart():
-    """Shopping cart page."""
-    cart = get_cart()
+    cart_data = get_cart()
     cart_items = []
-    
-    for product_id, quantity in cart.items():
-        product = Product.query.get(product_id)
+
+    for pid, qty in cart_data.items():
+        product = Product.query.get(pid)
         if product:
-            price = get_product_price_from_sql(product)
+            price = get_price(product)
             cart_items.append({
                 'product': product,
-                'quantity': quantity,
+                'quantity': qty,
                 'price': price,
-                'subtotal': price * quantity
+                'subtotal': price * qty,
             })
-    
-    # Get cross-sell recommendations based on cart items
-    cart_product_ids = list(cart.keys())
-    cross_sell_products_with_prices = []
+
+    # Cross-sell recommendations based on cart items
+    cart_product_ids = set(cart_data.keys())
+    cross_sell = []
     if cart_product_ids:
-        # Get products that are frequently bought with cart items
-        cross_sell_products = Product.query.filter(
-            Product.id.notin_(cart_product_ids)
-        ).limit(4).all()
-        for product in cross_sell_products:
-            price = get_product_price_from_sql(product)
-            cross_sell_products_with_prices.append({
-                'product': product,
-                'price': price
-            })
-    
+        # Gather recommendation targets from all cart items
+        rec_ids = set()
+        for pid in cart_product_ids:
+            recs = Recommendation.query.filter_by(product_id=int(pid)).order_by(
+                Recommendation.lift.desc()
+            ).limit(4).all()
+            for r in recs:
+                if str(r.recommended_with_id) not in cart_product_ids:
+                    rec_ids.add(r.recommended_with_id)
+
+        for rid in list(rec_ids)[:4]:
+            p = Product.query.get(rid)
+            if p:
+                cross_sell.append({'product': p, 'price': get_price(p)})
+
+        # Fallback if not enough recs
+        if len(cross_sell) < 4:
+            more = Product.query.filter(
+                Product.id.notin_([int(x) for x in cart_product_ids])
+            ).limit(4 - len(cross_sell)).all()
+            cross_sell.extend([{'product': p, 'price': get_price(p)} for p in more])
+
     total = sum(item['subtotal'] for item in cart_items)
-    
+
     return render_template('customer_app/cart.html',
-                         cart_items=cart_items,
-                         total=total,
-                         cross_sell_products=cross_sell_products_with_prices,
-                         sql_server_available=get_sql_server_status())
+                           cart_items=cart_items,
+                           total=total,
+                           cross_sell_products=cross_sell,
+                           sql_server_available=_sql_available)
+
 
 @customer_bp.route('/cart/add/<int:product_id>', methods=['POST'])
 def add_to_cart(product_id):
-    """Add product to cart."""
-    product = Product.query.get_or_404(product_id)
-    
+    Product.query.get_or_404(product_id)
+
     if 'cart' not in session:
         session['cart'] = {}
-    
+
     cart = session['cart']
-    product_id_str = str(product_id)
-    
-    if product_id_str in cart:
-        cart[product_id_str] += 1
-    else:
-        cart[product_id_str] = 1
-    
+    pid = str(product_id)
+    cart[pid] = cart.get(pid, 0) + 1
     session['cart'] = cart
     session.modified = True
-    
-    flash(f'{product.name} added to cart!', 'success')
+
+    flash('Added to cart!', 'success')
     return redirect(request.referrer or url_for('customer_app.index'))
+
 
 @customer_bp.route('/cart/remove/<int:product_id>', methods=['POST'])
 def remove_from_cart(product_id):
-    """Remove product from cart."""
     if 'cart' in session:
         cart = session['cart']
-        product_id_str = str(product_id)
-        
-        if product_id_str in cart:
-            del cart[product_id_str]
+        pid = str(product_id)
+        if pid in cart:
+            del cart[pid]
             session['cart'] = cart
             session.modified = True
-            flash('Product removed from cart', 'info')
-    
+            flash('Removed from cart', 'info')
     return redirect(url_for('customer_app.cart'))
+
 
 @customer_bp.route('/cart/update/<int:product_id>', methods=['POST'])
 def update_cart(product_id):
-    """Update product quantity in cart."""
     quantity = int(request.form.get('quantity', 1))
-    
     if 'cart' in session:
         cart = session['cart']
-        product_id_str = str(product_id)
-        
-        if product_id_str in cart:
+        pid = str(product_id)
+        if pid in cart:
             if quantity <= 0:
-                del cart[product_id_str]
+                del cart[pid]
             else:
-                cart[product_id_str] = quantity
-            
+                cart[pid] = quantity
             session['cart'] = cart
             session.modified = True
-    
     return redirect(url_for('customer_app.cart'))
+
 
 @customer_bp.route('/checkout', methods=['GET', 'POST'])
 def checkout():
-    """Checkout page."""
-    cart = get_cart()
-    
-    if not cart:
+    cart_data = get_cart()
+    if not cart_data:
         flash('Your cart is empty', 'warning')
         return redirect(url_for('customer_app.index'))
-    
+
     if request.method == 'POST':
-        # Process checkout
         customer_name = request.form.get('customer_name')
         customer_email = request.form.get('customer_email')
-        
+
         if not customer_name:
             flash('Please enter your name', 'error')
             return render_template('customer_app/checkout.html')
-        
-        # Create order
+
         order = Order(
             order_number=f"ORD-{uuid.uuid4().hex[:8].upper()}",
             customer_name=customer_name,
             customer_email=customer_email,
             total_amount=get_cart_total(),
-            status='completed'
+            status='completed',
         )
-        
         db.session.add(order)
         db.session.commit()
-        
-        # Add order items with prices from SQL Server
-        for product_id, quantity in cart.items():
-            product = Product.query.get(product_id)
+
+        for pid, qty in cart_data.items():
+            product = Product.query.get(pid)
             if product:
-                price = get_product_price_from_sql(product)
-                order_item = OrderItem(
+                price = get_price(product)
+                db.session.add(OrderItem(
                     order_id=order.id,
                     product_id=product.id,
-                    quantity=quantity,
-                    price=price
-                )
-                db.session.add(order_item)
-        
+                    quantity=qty,
+                    price=price,
+                ))
         db.session.commit()
-        
-        # Clear cart
+
         session.pop('cart', None)
-        
-        flash(f'Order {order.order_number} placed successfully!', 'success')
+        flash(f'Order {order.order_number} placed!', 'success')
         return redirect(url_for('customer_app.order_confirmation', order_id=order.id))
-    
+
     return render_template('customer_app/checkout.html')
+
 
 @customer_bp.route('/order/<int:order_id>/confirmation')
 def order_confirmation(order_id):
-    """Order confirmation page."""
     order = Order.query.get_or_404(order_id)
     return render_template('customer_app/confirmation.html', order=order)
 
+
 @customer_bp.route('/search')
 def search():
-    """Search products."""
     query = request.args.get('q', '')
-    
     if query:
         products = Product.query.filter(
-            (Product.name.ilike(f'%{query}%')) | 
+            (Product.name.ilike(f'%{query}%')) |
             (Product.description.ilike(f'%{query}%'))
         ).all()
     else:
         products = Product.query.all()
-    
-    # Get prices from SQL Server
-    products_with_prices = []
-    for product in products:
-        price = get_product_price_from_sql(product)
-        products_with_prices.append({
-            'product': product,
-            'price': price
-        })
-    
-    return render_template('customer_app/search.html', 
-                         products_with_prices=products_with_prices, 
-                         query=query,
-                         sql_server_available=get_sql_server_status())
+
+    products_with_prices = [
+        {'product': p, 'price': get_price(p)} for p in products
+    ]
+    return render_template('customer_app/search.html',
+                           products_with_prices=products_with_prices,
+                           query=query,
+                           sql_server_available=_sql_available)

@@ -95,6 +95,41 @@
     </div>
 </div>
 
+{% if sql_stats %}
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card border-dark">
+            <div class="card-header bg-dark text-white">
+                <h5><i class="fas fa-database"></i> SQL Server Pipeline Status</h5>
+            </div>
+            <div class="card-body">
+                <div class="row text-center">
+                    <div class="col-md-3">
+                        <h4>{{ sql_stats.raw_row_count|default(0) }}</h4>
+                        <small class="text-muted">Raw Rows (Row_data)</small>
+                    </div>
+                    <div class="col-md-3">
+                        <h4>{{ sql_stats.cleaned_row_count|default(0) }}</h4>
+                        <small class="text-muted">Cleaned Rows</small>
+                    </div>
+                    <div class="col-md-3">
+                        <h4>{{ sql_stats.transaction_count|default(0) }}</h4>
+                        <small class="text-muted">Unique Transactions</small>
+                    </div>
+                    <div class="col-md-3">
+                        <h4>{{ sql_stats.unique_products|default(0) }}</h4>
+                        <small class="text-muted">Unique Products</small>
+                    </div>
+                </div>
+                {% if sql_stats.avg_basket_size %}
+                <p class="text-center mt-2 mb-0"><small>Avg basket size: {{ sql_stats.avg_basket_size }} items</small></p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
 <div class="row mt-4">
     <div class="col-12">
         <div class="card">

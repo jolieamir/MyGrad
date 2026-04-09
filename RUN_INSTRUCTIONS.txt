@@ -1,57 +1,175 @@
-========================================
-HOW TO RUN THE MARKET BASKET MINING APP
-========================================
+============================================================
+  MyGrad — Setup & Run Instructions
+============================================================
 
-1. Open Command Prompt (cmd)
+PREREQUISITES
+------------------------------------------------------------
+1. Python 3.10+ installed
+2. SQL Server installed and running (Express/Developer/Standard)
+3. ODBC Driver 17 for SQL Server installed
+   Download: https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server
+4. Java JDK 17+ installed (for PySpark, optional)
 
-2. Navigate to the project directory:
-   cd C:\Users\user\OneDrive\Desktop\market-basket-mining
 
-3. Run the application:
-   python run.py
+STEP 1: Configure SQL Server Credentials
+------------------------------------------------------------
+Copy the example config:
 
-4. Open your web browser and go to:
-   http://127.0.0.1:5000
+  cp .env.example .env
 
-========================================
-TWO SEPARATE WEB APPS
-========================================
+Then open .env in a text editor.
 
-1. CUSTOMER APP (Public)
-   - URL: http://127.0.0.1:5000/
-   - Browse products by category
-   - Add items to shopping cart
-   - Place orders
-   - View product recommendations
+--- If you use WINDOWS AUTHENTICATION (most common): ---
 
-2. MANAGER APP (Admin Only)
-   - URL: http://127.0.0.1:5000/admin/
-   - Login required
-   - Upload transaction data (CSV)
-   - Run Apriori or FP-Growth mining
-   - View mining results and recommendations
-   - Manage product catalog
+  The default .env.example already works! Just keep:
+    SQL_TRUSTED_CONNECTION=yes
 
-========================================
-DEFAULT LOGIN CREDENTIALS
-========================================
-Username: admin
-Password: admin123
+  No username or password needed — it uses your Windows login.
 
-========================================
-TO STOP THE APPLICATION
-========================================
-Press CTRL+C in the Command Prompt window
+--- If you use SQL SERVER AUTHENTICATION (sa + password): ---
 
-========================================
-SAMPLE DATA
-========================================
-The app comes with 10 sample products:
-- Bread, Jam, Pasta, Pasta Sauce
-- Milk, Butter, Eggs, Cheese
-- Coffee, Olive Oil
+  Edit .env and change:
+    SQL_TRUSTED_CONNECTION=no
+    SQL_USERNAME=sa
+    SQL_PASSWORD=YourPasswordHere
 
-To reset database and re-add sample data:
-   python init_db.py
+IMPORTANT: Never commit .env to git (it's in .gitignore).
 
-========================================
+
+STEP 2: Create the Database
+------------------------------------------------------------
+Option A — Run the SQL script in SSMS:
+  Open sql/setup_tables.sql in SQL Server Management Studio
+  and execute it. This creates TestDB and all required tables.
+
+Option B — Run from command line (using sqlcmd):
+  sqlcmd -S . -U sa -P "YourStrong!Passw0rd" -i sql/setup_tables.sql
+
+
+STEP 3: Install Python Dependencies
+------------------------------------------------------------
+  python -m venv venv
+  venv\Scripts\activate          (Windows)
+  source venv/bin/activate       (Mac/Linux)
+  pip install -r requirements.txt
+
+
+STEP 4: Initialize the App Database
+------------------------------------------------------------
+  python init_db.py
+
+This creates the admin user and seed products.
+
+
+STEP 5: Test SQL Server Connection
+------------------------------------------------------------
+  python run.py test_sql_server
+
+If successful, you'll see table counts. If it fails,
+check your .env credentials.
+
+
+STEP 6: Run the Application
+------------------------------------------------------------
+  python run.py
+
+Open your browser:
+  Customer App:  http://127.0.0.1:5000/
+  Manager App:   http://127.0.0.1:5000/admin/
+  API:           http://127.0.0.1:5000/api/products
+
+
+============================================================
+  USING THE APP
+============================================================
+
+LOGIN CREDENTIALS
+  Username: admin
+  Password: admin123
+
+WORKFLOW
+  1. Go to Manager > Upload Transaction Data
+  2. Upload OnlineRetail.csv (included in the repo, 44MB)
+  3. Click "Run Pipeline" to load data into SQL Server
+  4. Go to Manager > Run Mining
+  5. Select algorithm (FP-Growth or Apriori) and parameters
+  6. Click "Run Mining" — watch the progress bar
+  7. View results: itemsets, rules, and recommendations
+  8. Customer app now shows "Frequently Bought Together"
+
+RECOMMENDED MINING PARAMETERS
+  min_support:    0.003 (0.3%) — good coverage
+  min_confidence: 0.3   (30%) — balanced rules
+
+
+============================================================
+  PROJECT STRUCTURE
+============================================================
+
+  .env.example          <-- Copy to .env, edit credentials
+  config.py             <-- Reads from .env automatically
+  run.py                <-- App entry point
+  init_db.py            <-- Database initialization
+  requirements.txt      <-- Python dependencies
+
+  sql/
+    setup_tables.sql    <-- Creates all SQL Server tables
+    cleaning_pipeline.sql
+    transaction_aggregation.sql
+
+  app/
+    __init__.py         <-- Flask app factory
+    models.py           <-- SQLAlchemy models
+    customer_app/       <-- Customer routes (shop, cart)
+    manager_app/        <-- Admin routes (upload, mining)
+    api/                <-- REST API endpoints
+
+  data_mining/
+    data_pipeline.py    <-- CSV -> SQL Server pipeline
+    apriori.py          <-- Apriori (SON) algorithm
+    fpgrowth.py         <-- FP-Growth algorithm
+    recommendations.py  <-- Recommendation engine
+    price_service.py    <-- SQL Server price lookup
+
+  templates/            <-- Jinja2 HTML templates
+  OnlineRetail.csv      <-- Sample dataset (44MB)
+
+
+============================================================
+  TROUBLESHOOTING
+============================================================
+
+"Login failed for user 'sa'"
+  -> Check SQL_USERNAME and SQL_PASSWORD in .env
+  -> Make sure SQL Server allows SQL Authentication
+     (Server Properties > Security > SQL Server and Windows Auth)
+
+"Cannot open database TestDB"
+  -> Run sql/setup_tables.sql first to create the database
+
+"ODBC Driver 17 not found"
+  -> Install from Microsoft's website (link above)
+  -> Or change SQL_DRIVER in .env to your installed version
+
+"Python worker crashed" (PySpark error)
+  -> PySpark has compatibility issues with Python 3.13
+  -> The app automatically falls back to pure-Python algorithms
+  -> This does NOT affect results — both produce identical output
+
+Port 5000 already in use
+  -> Change port: python run.py --port 5001
+  -> Or kill the existing process: taskkill /F /IM python.exe
+
+To stop the app
+  -> Press Ctrl+C in the terminal
+
+
+============================================================
+  RUNNING TESTS
+============================================================
+
+Smoke test (all components):
+  python smoke_test.py
+
+Validate mining results against raw data:
+  python validate_results.py
