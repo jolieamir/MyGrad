@@ -105,13 +105,21 @@ class FPGrowthMiner:
         freq_items = {item for item, count in item_counts.items() if count >= min_count}
         self._cb(10, f'{len(freq_items)} frequent items found')
 
-        # Phase 2: Build filtered transactions (20%)
-        def filter_and_sort(txn):
-            filtered = [item for item in txn if item in freq_items]
-            filtered.sort(key=lambda x: (-item_counts[x], x))
-            return filtered
+        # Map items to integers (saves memory in tree nodes)
+        item_to_id = {}
+        id_to_item = {}
+        for i, item in enumerate(sorted(freq_items, key=lambda x: -item_counts[x])):
+            item_to_id[item] = i
+            id_to_item[i] = item
 
-        sorted_txns = [filter_and_sort(txn) for txn in transactions]
+        # Phase 2: Build filtered transactions with integer IDs (20%)
+        sorted_txns = []
+        for txn in transactions:
+            filtered = [item_to_id[item] for item in txn if item in item_to_id]
+            filtered.sort()  # IDs already sorted by frequency
+            if filtered:
+                sorted_txns.append(filtered)
+        del transactions  # free original list
         self._cb(20, 'Transactions filtered and sorted')
 
         # Phase 3: Build FP-Tree (35%)
@@ -125,18 +133,21 @@ class FPGrowthMiner:
         self._mine_tree(header_table, min_count, set(), patterns)
         self._cb(70, f'{len(patterns)} patterns mined')
 
-        # Build results
+        del sorted_txns  # free memory
+
+        # Build results — convert integer IDs back to item names
         frequent_itemsets = []
-        itemset_support = {}
+        itemset_support = {}  # frozenset of names -> support
         for itemset_tuple, count in patterns.items():
             support = count / total
-            fs = frozenset(itemset_tuple)
-            itemset_support[fs] = support
+            name_set = frozenset(id_to_item[iid] for iid in itemset_tuple)
+            itemset_support[name_set] = support
             frequent_itemsets.append({
-                'items': sorted(list(itemset_tuple)),
+                'items': sorted([id_to_item[iid] for iid in itemset_tuple]),
                 'freq': count,
                 'support': round(support, 6),
             })
+        del patterns  # free memory
 
         # Add single items (only if not already found by tree mining)
         for item, count in item_counts.items():
