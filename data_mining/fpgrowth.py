@@ -135,47 +135,33 @@ class FPGrowthMiner:
 
         del sorted_txns  # free memory
 
-        # Build results — convert integer IDs back to item names
-        frequent_itemsets = []
-        itemset_support = {}  # frozenset of names -> support
+        # Build support lookup (needed internally for rule generation)
+        itemset_support = {}
         for itemset_tuple, count in patterns.items():
-            support = count / total
             name_set = frozenset(id_to_item[iid] for iid in itemset_tuple)
-            itemset_support[name_set] = support
-            frequent_itemsets.append({
-                'items': sorted([id_to_item[iid] for iid in itemset_tuple]),
-                'freq': count,
-                'support': round(support, 6),
-            })
+            itemset_support[name_set] = count / total
         del patterns  # free memory
 
-        # Add single items (only if not already found by tree mining)
+        # Include single items for rule denominators (antecedent/consequent support)
         for item, count in item_counts.items():
             if count >= min_count:
                 fs = frozenset([item])
                 if fs not in itemset_support:
-                    support = count / total
-                    itemset_support[fs] = support
-                    frequent_itemsets.append({
-                        'items': [item],
-                        'freq': count,
-                        'support': round(support, 6),
-                    })
+                    itemset_support[fs] = count / total
 
-        frequent_itemsets.sort(key=lambda x: x['support'], reverse=True)
-        self._cb(75, f'{len(frequent_itemsets)} itemsets compiled')
+        self._cb(70, f'{len(itemset_support)} support values computed')
 
-        # Phase 5: Generate association rules (95%)
+        # Generate association rules (FP-Growth focuses on rules only)
         self._cb(80, 'Generating association rules...')
         association_rules = self._generate_rules(itemset_support)
         association_rules.sort(key=lambda x: x['lift'], reverse=True)
         self._cb(95, f'{len(association_rules)} rules generated')
 
-        print(f"[FP-Growth] Found {len(frequent_itemsets)} frequent itemsets, "
-              f"{len(association_rules)} rules (pure Python)")
+        print(f"[FP-Growth] Found {len(association_rules)} association rules (pure Python)")
 
         self._cb(100, 'FP-Growth complete')
-        return {'frequent_itemsets': frequent_itemsets, 'association_rules': association_rules}
+        # FP-Growth focuses on association rules only — no frequent itemsets
+        return {'frequent_itemsets': [], 'association_rules': association_rules}
 
     def _build_fp_tree(self, transactions, min_count):
         root = _FPNode(None, None)

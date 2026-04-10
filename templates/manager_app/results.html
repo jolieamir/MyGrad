@@ -55,6 +55,7 @@
                     </div>
                 </div>
             </div>
+            {% if result.algorithm == 'apriori' %}
             <div class="col-md-3">
                 <div class="card text-center border-success">
                     <div class="card-body py-3">
@@ -63,6 +64,8 @@
                     </div>
                 </div>
             </div>
+            {% endif %}
+            {% if result.algorithm == 'fpgrowth' %}
             <div class="col-md-3">
                 <div class="card text-center border-warning">
                     <div class="card-body py-3">
@@ -71,6 +74,7 @@
                     </div>
                 </div>
             </div>
+            {% endif %}
             <div class="col-md-3">
                 <div class="card text-center border-info">
                     <div class="card-body py-3">
@@ -81,24 +85,32 @@
             </div>
         </div>
 
-        <!-- Tabs: Rules | Itemsets -->
+        {% set is_fpgrowth = result.algorithm == 'fpgrowth' %}
+        {% set is_apriori  = result.algorithm == 'apriori' %}
+
+        <!-- Tabs: algorithm-specific -->
         <ul class="nav nav-tabs mb-3" role="tablist">
+            {% if is_fpgrowth %}
             <li class="nav-item">
                 <a class="nav-link active" data-bs-toggle="tab" href="#rulesTab">
                     <i class="fas fa-arrow-right"></i> Association Rules
                     <span class="badge bg-warning text-dark ms-1" id="rulesBadge">0</span>
                 </a>
             </li>
+            {% endif %}
+            {% if is_apriori %}
             <li class="nav-item">
-                <a class="nav-link" data-bs-toggle="tab" href="#itemsetsTab">
+                <a class="nav-link active" data-bs-toggle="tab" href="#itemsetsTab">
                     <i class="fas fa-layer-group"></i> Frequent Itemsets
                     <span class="badge bg-success ms-1" id="itemsetsBadge">0</span>
                 </a>
             </li>
+            {% endif %}
         </ul>
 
         <div class="tab-content">
-            <!-- Association Rules Tab -->
+            {% if is_fpgrowth %}
+            <!-- Association Rules Tab (FP-Growth only) -->
             <div class="tab-pane fade show active" id="rulesTab">
                 <div class="card">
                     <div class="card-header d-flex justify-content-between align-items-center">
@@ -127,9 +139,11 @@
                     <div class="card-footer text-center" id="rulesFooter"></div>
                 </div>
             </div>
+            {% endif %}
 
-            <!-- Frequent Itemsets Tab -->
-            <div class="tab-pane fade" id="itemsetsTab">
+            {% if is_apriori %}
+            <!-- Frequent Itemsets Tab (Apriori only) -->
+            <div class="tab-pane fade show active" id="itemsetsTab">
                 <div class="card">
                     <div class="card-header d-flex justify-content-between align-items-center">
                         <span><strong>Frequent Itemsets</strong> <small class="text-muted">(sorted by support)</small></span>
@@ -165,6 +179,7 @@
                     <div class="card-footer text-center" id="itemsetsFooter"></div>
                 </div>
             </div>
+            {% endif %}
         </div>
 
         <script>
@@ -174,13 +189,18 @@
         var _allRules    = _rawData.association_rules || [];
         var _allItemsets = _rawData.frequent_itemsets || [];
 
-        // Stats
-        document.getElementById('statTxns').textContent     = (_params.transaction_count || '-').toLocaleString();
-        document.getElementById('statItemsets').textContent  = _allItemsets.length.toLocaleString();
-        document.getElementById('statRules').textContent     = _allRules.length.toLocaleString();
-        document.getElementById('statSupport').textContent   = _params.min_support;
-        document.getElementById('rulesBadge').textContent    = _allRules.length;
-        document.getElementById('itemsetsBadge').textContent = _allItemsets.length;
+        function setText(id, val) {
+            var el = document.getElementById(id);
+            if (el) el.textContent = val;
+        }
+
+        // Stats (only elements that exist for this algorithm)
+        setText('statTxns', (_params.transaction_count || '-').toLocaleString());
+        setText('statItemsets', _allItemsets.length.toLocaleString());
+        setText('statRules', _allRules.length.toLocaleString());
+        setText('statSupport', _params.min_support);
+        setText('rulesBadge', _allRules.length);
+        setText('itemsetsBadge', _allItemsets.length);
 
         // ---- Rules rendering ----
         function confBar(pct) {
@@ -261,9 +281,9 @@
             renderItemsets(filtered);
         }
 
-        // ---- Initial render ----
-        renderRules(_allRules);
-        filterItemsets();
+        // ---- Initial render (only for active tab) ----
+        if (document.getElementById('rulesBody')) renderRules(_allRules);
+        if (document.getElementById('itemsetsBody')) filterItemsets();
         </script>
 
         {% else %}

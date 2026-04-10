@@ -37,7 +37,13 @@
                 <div class="card-header bg-{{ color[0] }} text-white d-flex justify-content-between align-items-center">
                     <div>
                         <h5 class="mb-0"><i class="fas fa-chart-line"></i> Frequently Bought Together</h5>
-                        <small>Powered by {{ section.label }} association rules</small>
+                        <small>
+                            {% if section.name == 'FPGROWTH' %}
+                            Powered by FP-Growth association rules
+                            {% else %}
+                            Powered by Apriori frequent itemsets
+                            {% endif %}
+                        </small>
                     </div>
                     <span class="badge bg-light text-{{ color[1] }} fs-6">{{ section.name }}</span>
                 </div>

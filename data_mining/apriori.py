@@ -241,23 +241,13 @@ class AprioriMiner:
         del inv_sets  # free memory
 
         frequent_itemsets.sort(key=lambda x: x['support'], reverse=True)
-        self._cb(75, f'{len(frequent_itemsets)} itemsets found')
+        self._cb(95, f'{len(frequent_itemsets)} itemsets found')
 
-        # Phase 5: Generate rules (convert int IDs back to names)
-        self._cb(80, 'Generating association rules...')
-        # Build name-based support lookup for rule generation
-        name_support = {}
-        for fs, sup in itemset_support.items():
-            name_fs = frozenset(id_to_item[iid] for iid in fs)
-            name_support[name_fs] = sup
-        association_rules = self._generate_rules(name_support)
-        self._cb(95, f'{len(association_rules)} rules generated')
-
-        print(f"[Apriori] Found {len(frequent_itemsets)} frequent itemsets, "
-              f"{len(association_rules)} rules (pure Python)")
+        print(f"[Apriori] Found {len(frequent_itemsets)} frequent itemsets (pure Python)")
 
         self._cb(100, 'Apriori complete')
-        return {'frequent_itemsets': frequent_itemsets, 'association_rules': association_rules}
+        # Apriori focuses on frequent itemsets only — no association rules
+        return {'frequent_itemsets': frequent_itemsets, 'association_rules': []}
 
     # ------------------------------------------------------------------
     # Shared rule generation
